@@ -1,8 +1,9 @@
 [Unit]
-Description=Weekly Automated Restic Backup Timer (Runs every Sunday at 03:00)
+Description=Monthly Automated Restic Backup Timer (Runs on the 1st of every month at 03:00)
 
 [Timer]
-OnCalendar=Sun *-*-* 03:00:00
+Unit=homelab-backup.service
+OnCalendar=*-*-01 03:00:00
 Persistent=true
 
 [Install]
