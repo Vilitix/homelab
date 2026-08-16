@@ -1,0 +1,51 @@
+services:
+  tailscale_b:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-palworld
+    hostname: palworld-zenbook
+    environment:
+      - TS_AUTHKEY=tskey-auth-kdazSHDskc11CNTRL-ezwVEM2SLpF9FL3Rs255pF8WLTcKAqzpA   # Generate from Tailscale Admin Console (Tailnet B)
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+    volumes:
+      - ./tailscale-data:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+
+  palworld:
+    image: thijsvanloef/palworld-server-docker:latest
+    container_name: palworld-server
+    restart: unless-stopped
+    network_mode: "service:tailscale_b"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    stop_grace_period: 30s
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - PORT=8211
+      - PLAYERS=2                           # Set for 2 players
+      - SERVER_NAME=ZenBook Palworld
+      - SERVER_PASSWORD=Maximilienne    # Change this
+      - ADMIN_PASSWORD=Maximilienne    # Change this
+      - UPDATE_ON_BOOT=true                # Check for game updates when container starts
+      - ENABLE_PERF_THREADING_ARGS=false   # Disabled to lower CPU load & temperatures on 2-player setup
+      - BACKUP_ENABLED=true                # Automatic background backups
+      - BACKUP_CRON_EXPRESSION=0 * * * *   # Saves backup once every hour
+      - TARGET_WORLD_NAME=5D0AC2D84A947720E2823A8F4D0D8FFC
+      - PAL_EGG_DEFAULT_HATCHING_TIME=0.000000
+
+      - AUTO_PAUSE_ENABLED=true
+      - ENABLE_PLAYER_LOGGING=true
+      - REST_API_ENABLED=true
+      - AUTO_PAUSE_TIMEOUT_EST=180
+      - AUTOPAUSE_KNOCK_INTERFACE=eth0 tailscale0 lo
+    volumes:
+      - ./palworld-data:/palworld
+      - ./knockd-ctl.sh:/home/steam/server/autopause/knockd-ctl.sh
+    depends_on:
+      - tailscale_b

@@ -1,0 +1,236 @@
+services:
+  vpn:
+    container_name: vpn
+    image: qmcgaw/gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ${HOMELAB_DIR}/containers/gluetun:/gluetun
+    environment:
+      - TZ=Europe/Paris
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      - FREE_ONLY=off
+      - SERVER_COUNTRIES=Switzerland,Netherlands
+      - VPN_PORT_FORWARDING=on
+      - VPN_PORT_FORWARDING_STATUS_FILE=/gluetun/forwarded_port
+      - FIREWALL_OUTBOUND_SUBNETS=192.168.1.0/24,172.16.0.0/12
+    ports:
+        #- 32400:32400 #plex
+      - 6881:6881 #qbit tcp
+      - 6881:6881/udp #qbit udp
+      - 18181:18181 #qbitorrent UI
+      - 7878:7878 # radarr
+      - 8989:8989 # sonarr
+      - 9117:9117 # jackett
+      - 9696:9696 #prowlarr
+      # - 5055:5055 # overseerr
+      - 6767:6767 # bazarr
+      - 8191:8191 # flaresolverr
+    restart: always
+
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    #network_mode: service:vpn
+    network_mode: host
+    mem_limit: 2g
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM} #optional
+    #ports:
+      #- 32400:32400 # plex
+    volumes:
+      - ${HOMELAB_DIR}/containers/jellyfin/config:/config
+      - /mnt/storage/media/tv:/data/tvshows
+      - /mnt/storage/media/movies:/data/movies
+    restart: unless-stopped
+
+  overseerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: seerr
+    network_mode: host
+      #ports:
+      #- 5055:5055
+    environment:
+      - LOG_LEVEL=debug
+      - TZ=Europe/Paris
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ${HOMELAB_DIR}/containers/seerr/config:/app/config
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    #platform: linux/arm64
+    container_name: qbittorrent
+    network_mode: service:vpn
+    depends_on:
+      - "vpn"
+    mem_limit: 2g
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+      - WEBUI_PORT=18181
+      #- QTE_X11PORT=-1   # Disable Qt GUI issues on ARM [web:73]
+    volumes:
+      - ${HOMELAB_DIR}/containers/qbittorrent/config:/config
+      - /mnt/storage/downloads:/downloads:rshared
+    restart: unless-stopped
+
+  port-manager:
+    image: jopiermeier/gluetun-qbittorrent-port-manager:latest
+    container_name: gluetun-qbittorrent-port-manager
+    network_mode: service:vpn
+    depends_on:
+      - vpn
+      - qbittorrent
+    volumes:
+      - ${HOMELAB_DIR}/containers/gluetun:/tmp/gluetun:ro
+    environment:
+      - PORT_FILE=/tmp/gluetun/forwarded_port
+      - QBITTORRENT_SERVER=localhost
+      - QBITTORRENT_PORT=18181
+      - QBITTORRENT_USER=juliegbblz
+      - QBITTORRENT_PASS=dummy
+    restart: unless-stopped
+
+  bazarr:
+    image: ghcr.io/linuxserver/bazarr
+    container_name: bazarr
+    network_mode: service:vpn
+    depends_on:
+      - "vpn"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+    volumes:
+      - ${HOMELAB_DIR}/containers/bazarr/config:/config
+      - /mnt/storage/media/movies:/movies
+      - /mnt/storage/media/tv:/tv
+    restart: unless-stopped
+
+  jackett:
+    image: ghcr.io/linuxserver/jackett
+    container_name: jackett
+    network_mode: service:vpn
+    depends_on:
+      - "vpn"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+      - AUTO_UPDATE=true #optional
+    volumes:
+      - ${HOMELAB_DIR}/containers/jackett/config:/config
+      - /mnt/storage/downloads:/downloads
+    restart: unless-stopped
+
+  sonarr:
+    image: ghcr.io/linuxserver/sonarr
+    container_name: sonarr
+    network_mode: service:vpn
+    depends_on:
+      - "vpn"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+    volumes:
+      - ${HOMELAB_DIR}/containers/sonarr/config:/config
+      - /mnt/storage/media:/media:rshared
+      - /mnt/storage/downloads:/downloads:rshared
+    restart: unless-stopped
+
+  radarr:
+    image: ghcr.io/linuxserver/radarr
+    container_name: radarr
+    network_mode: service:vpn
+    depends_on:
+      - "vpn"
+    mem_limit: 1g
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+      - WEBUI_PORT=7878
+      - DOTNET_GCServer=0
+    volumes:
+      - ${HOMELAB_DIR}/containers/radarr/config:/config
+      - /mnt/storage/media:/media:rshared
+      - /mnt/storage/downloads:/downloads:rshared
+    #ports:
+      #- 7878:7878
+    restart: unless-stopped
+
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    network_mode: service:vpn
+    depends_on:
+      - "vpn"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+    volumes:
+      - ${HOMELAB_DIR}/containers/prowlarr/config:/config
+      - /mnt/storage/media:/media:rshared 
+    #ports:
+      #- 9696:9696
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    network_mode: service:vpn
+    depends_on:
+      - "vpn"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_HTML=${LOG_HTML:-false}
+      - CAPTCHA_SOLVER=${CAPTCHA_SOLVER:-none}
+      - TZ=Europe/Paris
+    #ports:
+      #- "${PORT:-8191}:8191"
+    restart: always
+
+  maintainerr:
+    image: ghcr.io/maintainerr/maintainerr:latest
+    container_name: maintainerr
+    network_mode: host
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+    volumes:
+      - ${HOMELAB_DIR}/containers/maintainerr/data:/opt/data
+    restart: unless-stopped
+
+  homarr:
+    image: ghcr.io/homarr-labs/homarr:latest
+    container_name: homarr
+    ports:
+      - 7575:7575
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+      - SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_KEY}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${HOMELAB_DIR}/containers/homarr/appdata:/appdata
+    restart: unless-stopped

@@ -1,0 +1,26 @@
+SERVICES & PORTS DIRECTORY
+
+MONITORING STACK (/home/arthur/homelab/monitoring)
+- Grafana: 3000
+- cAdvisor: 8080
+- Prometheus: 9090
+- Node Exporter: 9100
+
+MEDIA STACK (/home/arthur/homelab/stream)
+- Jellyfin: 8096
+- Overseerr / Seerr: 5055
+- qBittorrent WebUI: 18181
+- Sonarr: 8989
+- Radarr: 7878
+- Prowlarr: 9696
+- Jackett: 9117
+- Bazarr: 6767
+- FlareSolverr: 8191
+
+PORTFOLIO STACK (/home/arthur/homelab/portfolio)
+- Nginx: 80 / 443
+- Next.js Web: 3000 (internal)
+
+GAME SERVER & NETWORK (/home/arthur/homelab/palworld-server)
+- Palworld Game: 8211 (UDP)
+

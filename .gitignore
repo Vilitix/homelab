@@ -1,0 +1,18 @@
+# Environment files & Secrets
+.env
+.env.*
+*.env
+*.env*
+
+# Container runtime state & persistent data
+containers/
+
+# Palworld server runtime & save data
+/palworld-server/palworld-data/
+/palworld-server/tailscale-data/
+/palworld-server/Palworld-Co-op-to-Dedicated-Server-Migration-Tool/
+
+# Portfolio (only track docker-compose.yml; source code lives in its own repo)
+/portfolio/*
+!/portfolio/docker-compose.yml
+
