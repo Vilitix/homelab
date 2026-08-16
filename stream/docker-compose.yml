@@ -25,7 +25,6 @@ services:
       - 18181:18181 #qbitorrent UI
       - 7878:7878 # radarr
       - 8989:8989 # sonarr
-      - 9117:9117 # jackett
       - 9696:9696 #prowlarr
       # - 5055:5055 # overseerr
       - 6767:6767 # bazarr
@@ -118,22 +117,6 @@ services:
       - ${HOMELAB_DIR}/containers/bazarr/config:/config
       - /mnt/storage/media/movies:/movies
       - /mnt/storage/media/tv:/tv
-    restart: unless-stopped
-
-  jackett:
-    image: ghcr.io/linuxserver/jackett
-    container_name: jackett
-    network_mode: service:vpn
-    depends_on:
-      - "vpn"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Europe/Paris
-      - AUTO_UPDATE=true #optional
-    volumes:
-      - ${HOMELAB_DIR}/containers/jackett/config:/config
-      - /mnt/storage/downloads:/downloads
     restart: unless-stopped
 
   sonarr:

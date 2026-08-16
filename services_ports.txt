@@ -13,7 +13,6 @@ MEDIA STACK (/home/arthur/homelab/stream)
 - Sonarr: 8989
 - Radarr: 7878
 - Prowlarr: 9696
-- Jackett: 9117
 - Bazarr: 6767
 - FlareSolverr: 8191
 
