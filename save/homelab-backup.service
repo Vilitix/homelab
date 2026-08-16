@@ -1,0 +1,8 @@
+[Unit]
+Description=Automated Restic Homelab Container Backup
+After=network.target
+
+[Service]
+Type=oneshot
+User=arthur
+ExecStart=/home/arthur/homelab/save/backup.sh

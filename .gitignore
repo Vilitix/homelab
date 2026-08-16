@@ -15,4 +15,10 @@ containers/
 # Portfolio (only track docker-compose.yml; source code lives in its own repo)
 /portfolio/*
 !/portfolio/docker-compose.yml
+# Restic local backup repository
+/save/local-repo/
 
+# Logs & OS artifacts
+*.log
+.DS_Store
+Thumbs.db

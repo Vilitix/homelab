@@ -1,0 +1,14 @@
+# Cache and temporary folders to exclude from container backups
+*/cache/*
+*/Cache/*
+*/caches/*
+*/tmp/*
+*/temp/*
+*/.cache/*
+*/log/*
+*/logs/*
+*.log
+*/transcode/*
+*/Transcodes/*
+*/downloads/*
+*/photoprism/storage/cache/*
