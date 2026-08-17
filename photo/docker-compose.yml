@@ -20,6 +20,12 @@ services:
       PHOTOPRISM_UID: 1000
       PHOTOPRISM_GID: 1000
       PHOTOPRISM_UMASK: "0002"
+      PHOTOPRISM_WORKERS: 1
+      PHOTOPRISM_DISABLE_TENSORFLOW: "true"
+      PHOTOPRISM_DISABLE_FACES: "true"
+      PHOTOPRISM_AUTO_INDEX: "0"
+      PHOTOPRISM_AUTO_IMPORT: "0"
+      PHOTOPRISM_INDEX_SCHEDULE: ""
       TZ: Europe/Paris
       # Intel iGPU QuickSync / VA-API hardware acceleration for Zenbook 13
       PHOTOPRISM_FFMPEG_ENCODER: "intel"

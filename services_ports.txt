@@ -23,3 +23,8 @@ PORTFOLIO STACK (/home/arthur/homelab/portfolio)
 GAME SERVER & NETWORK (/home/arthur/homelab/palworld-server)
 - Palworld Game: 8211 (UDP)
 
+MUSIC STACK (/home/arthur/homelab/music)
+- Navidrome: 4533
+- slskd (Soulseek): 5030 (Web UI) / 5031 (Listen Port)
+- spotDL Web UI: 8888
+

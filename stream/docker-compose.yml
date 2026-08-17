@@ -29,6 +29,7 @@ services:
       # - 5055:5055 # overseerr
       - 6767:6767 # bazarr
       - 8191:8191 # flaresolverr
+      - 5030:5030 # slskd UI
     restart: always
 
   jellyfin:
