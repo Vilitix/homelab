@@ -27,4 +27,6 @@ MUSIC STACK (/home/arthur/homelab/music)
 - Navidrome: 4533
 - slskd (Soulseek): 5030 (Web UI) / 5031 (Listen Port)
 - spotDL Web UI: 8888
+- Lidarr: 8686
+
 

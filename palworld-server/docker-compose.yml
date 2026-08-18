@@ -35,7 +35,7 @@ services:
       - UPDATE_ON_BOOT=true                # Check for game updates when container starts
       - ENABLE_PERF_THREADING_ARGS=false   # Disabled to lower CPU load & temperatures on 2-player setup
       - BACKUP_ENABLED=true                # Automatic background backups
-      - BACKUP_CRON_EXPRESSION=0 * * * *   # Saves backup once every hour
+      - BACKUP_CRON_EXPRESSION=0 0 * * *   # Saves backup once every 24 hours (daily at midnight)
       - TARGET_WORLD_NAME=5D0AC2D84A947720E2823A8F4D0D8FFC
       - PAL_EGG_DEFAULT_HATCHING_TIME=0.000000
 

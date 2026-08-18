@@ -22,19 +22,6 @@ services:
       - /mnt/storage/media/music:/music:ro
     restart: unless-stopped
 
-  slskd:
-    image: slskd/slskd:latest
-    container_name: slskd
-    network_mode: container:vpn
-    environment:
-      - SLSKD_REMOTE_CONFIGURATION=true
-      - SLSKD_SLSK_LISTEN_PORT=5031
-    volumes:
-      - ${HOMELAB_DIR}/containers/slskd/config:/app
-      - /mnt/storage/media/music:/music
-      - /mnt/storage/downloads/music:/downloads
-    restart: unless-stopped
-
   spotdl-web:
     image: spotdl/spotify-downloader:latest
     container_name: spotdl-web
@@ -46,3 +33,26 @@ services:
       - /mnt/storage/media/music:/music
     working_dir: /music
     restart: unless-stopped
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - ${HOMELAB_DIR}/containers/lidarr/config:/config
+      - /mnt/storage/media/music:/music
+      - /mnt/storage/downloads/music:/downloads
+    ports:
+      - "8686:8686"
+    networks:
+      - default
+      - stream_default
+    restart: unless-stopped
+
+networks:
+  default:
+  stream_default:
+    external: true
