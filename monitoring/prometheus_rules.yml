@@ -1,0 +1,58 @@
+groups:
+  - name: alerts
+    rules:
+      - alert: PortfolioDown
+        expr: absent(container_last_seen{name="portfolio-web-1"}) or absent(container_last_seen{name="portfolio-nginx-1"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Portfolio is down"
+          description: "The portfolio web or nginx container has been down for more than 1 minute."
+
+      - alert: HighCPUTemperature
+        expr: avg_over_time(node_hwmon_temp_celsius{chip="platform_coretemp_0",sensor="temp1"}[5m]) > 70
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU Temperature"
+          description: "CPU temperature has been over 70 degrees on average for 5 minutes."
+
+      - alert: ContainerRestartLoop
+        expr: changes(container_start_time_seconds{name!=""}[15m]) >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} is crash-looping"
+          description: "The container {{ $labels.name }} has restarted 3 or more times in the last 15 minutes."
+
+      - alert: HostOutOfMemory
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 < 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory is critically low"
+          description: "Available memory on the server is below 10% for more than 2 minutes."
+
+      - alert: HostDiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host disk space is running out"
+          description: "Available disk space on the root filesystem is below 15%."
+
+      - alert: VPNDown
+        expr: absent(container_last_seen{name="vpn"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gluetun VPN is down"
+          description: "The VPN container has been down for 2 minutes. Media downloads (Radarr/Sonarr/qBittorrent) are blocked."
+
+

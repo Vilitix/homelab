@@ -19,6 +19,8 @@ services:
     image: thijsvanloef/palworld-server-docker:latest
     container_name: palworld-server
     restart: unless-stopped
+    mem_limit: 12g
+    cpus: 4
     network_mode: "service:tailscale_b"
     cap_add:
       - NET_ADMIN

@@ -2,6 +2,8 @@ services:
   vpn:
     container_name: vpn
     image: qmcgaw/gluetun
+    mem_limit: 256m
+    cpus: 0.5
     cap_add:
       - NET_ADMIN
     devices:
@@ -38,6 +40,12 @@ services:
     #network_mode: service:vpn
     network_mode: host
     mem_limit: 2g
+    cpus: 4
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     devices:
       - /dev/dri:/dev/dri
     environment:
@@ -57,6 +65,13 @@ services:
     image: ghcr.io/seerr-team/seerr:latest
     container_name: seerr
     network_mode: host
+    mem_limit: 1g
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5055/"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
       #ports:
       #- 5055:5055
     environment:
@@ -76,6 +91,12 @@ services:
     depends_on:
       - "vpn"
     mem_limit: 2g
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18181/"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     environment:
       - PUID=1000
       - PGID=1000
@@ -91,6 +112,8 @@ services:
     image: jopiermeier/gluetun-qbittorrent-port-manager:latest
     container_name: gluetun-qbittorrent-port-manager
     network_mode: service:vpn
+    mem_limit: 128m
+    cpus: 0.2
     depends_on:
       - vpn
       - qbittorrent
@@ -108,6 +131,13 @@ services:
     image: ghcr.io/linuxserver/bazarr
     container_name: bazarr
     network_mode: service:vpn
+    mem_limit: 512m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6767/ping"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     depends_on:
       - "vpn"
     environment:
@@ -124,6 +154,13 @@ services:
     image: ghcr.io/linuxserver/sonarr
     container_name: sonarr
     network_mode: service:vpn
+    mem_limit: 1g
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     depends_on:
       - "vpn"
     environment:
@@ -143,6 +180,12 @@ services:
     depends_on:
       - "vpn"
     mem_limit: 1g
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     environment:
       - PUID=1000
       - PGID=1000
@@ -162,6 +205,13 @@ services:
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr
     network_mode: service:vpn
+    mem_limit: 512m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9696/ping"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     depends_on:
       - "vpn"
     environment:
@@ -179,6 +229,8 @@ services:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
     network_mode: service:vpn
+    mem_limit: 2g
+    cpus: 1
     depends_on:
       - "vpn"
     environment:
@@ -194,6 +246,8 @@ services:
     image: ghcr.io/maintainerr/maintainerr:latest
     container_name: maintainerr
     network_mode: host
+    mem_limit: 256m
+    cpus: 0.5
     environment:
       - PUID=1000
       - PGID=1000
@@ -202,19 +256,3 @@ services:
       - ${HOMELAB_DIR}/containers/maintainerr/data:/opt/data
     restart: unless-stopped
 
-  homarr:
-    image: ghcr.io/homarr-labs/homarr:latest
-    container_name: homarr
-    ports:
-      - 7575:7575
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Europe/Paris
-      - SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_KEY}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${HOMELAB_DIR}/containers/homarr/appdata:/appdata
-    restart: unless-stopped

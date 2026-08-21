@@ -2,6 +2,13 @@ services:
   navidrome:
     image: deluan/navidrome:latest
     container_name: navidrome
+    mem_limit: 512m
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4533/ping"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     user: "1000:1000"
     ports:
       - "4533:4533"
@@ -19,17 +26,43 @@ services:
       - ND_LASTFM_SECRET=${LASTFM_SECRET:-}
     volumes:
       - ${HOMELAB_DIR}/containers/navidrome/data:/data
-      - /mnt/storage/media/music:/music:ro
+      - /mnt/storage/media/music/arthur:/music:ro
+    restart: unless-stopped
+
+  navidrome-karine:
+    image: deluan/navidrome:latest
+    container_name: navidrome-karine
+    mem_limit: 512m
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4533/ping"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
+    user: "1000:1000"
+    ports:
+      - "4534:4533"
+    environment:
+      - ND_SCANSCHEDULE=1h
+      - ND_LOGLEVEL=info
+      - ND_SESSIONTIMEOUT=24h
+      - ND_BASEURL=
+      - ND_MUSICFOLDER=/music
+    volumes:
+      - ${HOMELAB_DIR}/containers/navidrome-karine/data:/data
+      - /mnt/storage/media/music/karine:/music:ro
     restart: unless-stopped
 
   spotdl-web:
     image: spotdl/spotify-downloader:latest
     container_name: spotdl-web
+    mem_limit: 2g
+    cpus: 2
     command: web --host 0.0.0.0 --port 8888
     ports:
       - "8888:8888"
     volumes:
-      - ${HOMELAB_DIR}/containers/spotdl/config:/root/.spotdl
+      - ${HOMELAB_DIR}/containers/spotdl/config:/home/spotdl/.spotdl
       - /mnt/storage/media/music:/music
     working_dir: /music
     restart: unless-stopped
@@ -37,6 +70,13 @@ services:
   lidarr:
     image: lscr.io/linuxserver/lidarr:latest
     container_name: lidarr
+    mem_limit: 1g
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8686/ping"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
     environment:
       - PUID=1000
       - PGID=1000
@@ -51,6 +91,25 @@ services:
       - default
       - stream_default
     restart: unless-stopped
+
+
+  music-app:
+    build: ${HOMELAB_DIR}/containers/music_request_app
+    container_name: music-app
+    mem_limit: 512m
+    cpus: 0.5
+    ports:
+      - "5000:5000"
+    environment:
+      - LIDARR_URL=http://lidarr:8686
+      - LIDARR_API_KEY=830989a7747c4f82a9f96ca4a467afb9
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOMELAB_DIR}/containers/music_request_app:/app
+    networks:
+      - default
+    restart: unless-stopped
+
 
 networks:
   default:

@@ -2,6 +2,8 @@ services:
   node-exporter:
     image: prom/node-exporter:latest
     container_name: node-exporter
+    mem_limit: 128m
+    cpus: 0.2
     restart: unless-stopped
     volumes:
       - /proc:/host/proc:ro
@@ -20,6 +22,8 @@ services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: cadvisor
+    mem_limit: 512m
+    cpus: 0.5
     restart: unless-stopped
     privileged: true
     devices:
@@ -46,6 +50,8 @@ services:
   cadvisor-helper:
     image: docker:cli
     container_name: cadvisor-helper
+    mem_limit: 128m
+    cpus: 0.2
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -69,9 +75,12 @@ services:
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
+    mem_limit: 1g
+    cpus: 1
     restart: unless-stopped
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus_rules.yml:/etc/prometheus/prometheus_rules.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -83,9 +92,38 @@ services:
     networks:
       - monitoring-net
 
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    mem_limit: 128m
+    cpus: 0.2
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+    ports:
+      - "9093:9093"
+    networks:
+      - monitoring-net
+
+  ntfy:
+    build:
+      context: ./ntfy
+    container_name: ntfy
+    mem_limit: 128m
+    cpus: 0.2
+    restart: unless-stopped
+    environment:
+      - NTFY_TOPIC=${NTFY_TOPIC}
+    networks:
+      - monitoring-net
+
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
+    mem_limit: 512m
+    cpus: 0.5
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -96,6 +134,22 @@ services:
       - ./provisioning:/etc/grafana/provisioning:ro
     networks:
       - monitoring-net
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.2
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=900
+      - CURL_TIMEOUT=15
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - monitoring-net
+
 
 networks:
   monitoring-net:

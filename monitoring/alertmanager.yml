@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+  receiver: 'ntfy-pushbullet'
+
+receivers:
+  - name: 'ntfy-pushbullet'
+    webhook_configs:
+      - url: 'http://ntfy:5000/webhook'
+        send_resolved: true
