@@ -49,6 +49,8 @@ services:
     container_name: photoprism-mariadb
     mem_limit: 1g
     cpus: 1
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
     command: --innodb-buffer-pool-size=512M --transaction-isolation=READ-COMMITTED --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --max-connections=512 --innodb-rollback-on-timeout=1 --innodb-lock-wait-timeout=120
     environment:
       MARIADB_AUTO_UPGRADE: "1"

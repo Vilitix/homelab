@@ -1,14 +1,19 @@
 SERVICES & PORTS DIRECTORY
 
+HOME DASHBOARD (/home/arthur/homelab/home)
+- Home Page: 7575
+
 MONITORING STACK (/home/arthur/homelab/monitoring)
 - Grafana: 3000
 - cAdvisor: 8080
 - Prometheus: 9090
+- Alertmanager: 9093
 - Node Exporter: 9100
 
 MEDIA STACK (/home/arthur/homelab/stream)
 - Jellyfin: 8096
 - Overseerr / Seerr: 5055
+- Maintainerr: 6246
 - qBittorrent WebUI: 18181
 - Sonarr: 8989
 - Radarr: 7878
@@ -25,8 +30,10 @@ GAME SERVER & NETWORK (/home/arthur/homelab/palworld-server)
 
 MUSIC STACK (/home/arthur/homelab/music)
 - Navidrome: 4533
-- slskd (Soulseek): 5030 (Web UI) / 5031 (Listen Port)
+- Navidrome (Karine): 4534
 - spotDL Web UI: 8888
 - Lidarr: 8686
+- Music App: 5000
 
-
+PHOTO STACK (/home/arthur/homelab/photo)
+- PhotoPrism: 2342

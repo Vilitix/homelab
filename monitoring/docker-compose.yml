@@ -151,6 +151,23 @@ services:
       - monitoring-net
 
 
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=86400
+      - WATCHTOWER_NOTIFICATIONS=shoutrrr
+      - WATCHTOWER_NOTIFICATION_URL=ntfy://ntfy.sh/${NTFY_TOPIC}
+      - DOCKER_API_VERSION=1.41
+    networks:
+      - monitoring-net
+
 networks:
   monitoring-net:
     driver: bridge
