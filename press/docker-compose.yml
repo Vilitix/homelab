@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # 1. The Core Reader
+  freshrss:
+    image: freshrss/freshrss:latest
+    container_name: freshrss
+    restart: unless-stopped
+    ports:
+      - "${FRESHRSS_PORT:-8085}:80"
+    environment:
+      TZ: Europe/Paris
+      CRON_MIN: '3,33'
+    volumes:
+      - ./data/freshrss:/var/www/FreshRSS/data
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+
+  # 2. The Site Scraper
+  rss-bridge:
+    image: rssbridge/rss-bridge:latest
+    container_name: rss-bridge
+    restart: unless-stopped
+    ports:
+      - "${RSSBRIDGE_PORT:-8086}:80"
+    volumes:
+      - ./data/rssbridge:/config
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+
+  # 3. The Full Text Extractor
+  morss:
+    image: pictuga/morss:latest
+    container_name: morss
+    restart: unless-stopped
+    ports:
+      - "${MORSS_PORT:-8087}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000/ || exit 1"]
+      interval: 15m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+
+  # 4. Read-it-later
+  wallabag:
+    image: wallabag/wallabag:latest
+    container_name: wallabag
+    restart: unless-stopped
+    ports:
+      - "${WALLABAG_PORT:-8088}:80"
+    environment:
+      - SYMFONY__ENV__DOMAIN_NAME=http://${HOMELAB_IP:-192.168.1.20}:${WALLABAG_PORT:-8088}
+      - SYMFONY__ENV__SERVER_NAME="My Wallabag"
+    volumes:
+      - ./data/wallabag/images:/var/www/wallabag/web/assets/images
+      - ./data/wallabag/data:/var/www/wallabag/data
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M

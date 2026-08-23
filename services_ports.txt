@@ -35,5 +35,10 @@ MUSIC STACK (/home/arthur/homelab/music)
 - Lidarr: 8686
 - Music App: 5000
 
-PHOTO STACK (/home/arthur/homelab/photo)
 - PhotoPrism: 2342
+
+PRESS / INFORMATION STACK (/home/arthur/homelab/press)
+- FreshRSS: 8085
+- RSS-Bridge: 8086
+- Morss: 8087
+- Wallabag: 8088

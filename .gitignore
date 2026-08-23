@@ -18,6 +18,10 @@ containers/
 # Restic local backup repository
 /save/local-repo/
 
+
+#press data
+/press/data
+
 # Logs & OS artifacts
 *.log
 .DS_Store

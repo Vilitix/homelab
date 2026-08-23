@@ -19,7 +19,11 @@ const services = [
     { name: "spotDL", port: 8888, icon: "spotify.png" },
     { name: "Music App", port: 5000, icon: "headphones.png" },
     { name: "PhotoPrism", port: 2342, icon: "photoprism.png" },
-    { name: "Portfolio", port: 80, icon: "nginx.png" }
+    { name: "Portfolio", port: 80, icon: "nginx.png" },
+    { name: "FreshRSS", port: 8085, icon: "freshrss.png" },
+    { name: "RSS-Bridge", port: 8086, icon: "rss.png" },
+    { name: "Morss", port: 8087, icon: "rss.png" },
+    { name: "Wallabag", port: 8088, icon: "wallabag.png" }
 ];
 
 const iconBase = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/";

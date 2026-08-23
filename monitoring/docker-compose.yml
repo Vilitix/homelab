@@ -163,7 +163,9 @@ services:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_POLL_INTERVAL=86400
       - WATCHTOWER_NOTIFICATIONS=shoutrrr
-      - WATCHTOWER_NOTIFICATION_URL=ntfy://ntfy.sh/${NTFY_TOPIC}
+      - WATCHTOWER_NOTIFICATION_URL=ntfy://ntfy.sh/${NTFY_TOPIC}?title=Watchtower
+      - WATCHTOWER_NOTIFICATION_SKIP_TITLE=true
+      - WATCHTOWER_NOTIFICATION_REPORT=true
       - DOCKER_API_VERSION=1.41
     networks:
       - monitoring-net
