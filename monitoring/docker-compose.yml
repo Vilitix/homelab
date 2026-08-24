@@ -145,6 +145,7 @@ services:
       - AUTOHEAL_CONTAINER_LABEL=all
       - AUTOHEAL_INTERVAL=900
       - CURL_TIMEOUT=15
+      - WEBHOOK_URL=https://ntfy.sh/${NTFY_TOPIC}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
@@ -161,11 +162,23 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_POLL_INTERVAL=86400
+      - WATCHTOWER_POLL_INTERVAL=604800
       - WATCHTOWER_NOTIFICATIONS=shoutrrr
       - WATCHTOWER_NOTIFICATION_URL=ntfy://ntfy.sh/${NTFY_TOPIC}?title=Watchtower
       - WATCHTOWER_NOTIFICATION_SKIP_TITLE=true
       - WATCHTOWER_NOTIFICATION_REPORT=true
+      - |
+        WATCHTOWER_NOTIFICATION_TEMPLATE=
+        {{- if .Report -}}
+          {{- with .Report -}}
+            {{len .Updated}} Containers Updated:
+            {{- range .Updated}}
+            - {{.Name}}
+            {{- end -}}
+          {{- end -}}
+        {{- else -}}
+          {{range .Entries -}}{{.Message}}{{println}}{{- end -}}
+        {{- end -}}
       - DOCKER_API_VERSION=1.41
     networks:
       - monitoring-net

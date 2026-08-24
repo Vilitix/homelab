@@ -21,6 +21,7 @@ containers/
 
 #press data
 /press/data
+*.opml
 
 # Logs & OS artifacts
 *.log
