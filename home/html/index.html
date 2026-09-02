@@ -19,6 +19,9 @@
         <!-- populated by js -->
     </main>
 
-    <script src="script.js"></script>
+    <script>
+        // Force the browser to always fetch the latest version of script.js without caching
+        document.write('<script src="script.js?v=' + Date.now() + '"><\/script>');
+    </script>
 </body>
 </html>

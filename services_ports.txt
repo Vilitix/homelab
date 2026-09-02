@@ -31,9 +31,9 @@ GAME SERVER & NETWORK (/home/arthur/homelab/palworld-server)
 MUSIC STACK (/home/arthur/homelab/music)
 - Navidrome: 4533
 - Navidrome (Karine): 4534
-- spotDL Web UI: 8888
+- MusicGrabber (Arthur): 38274
+- MusicGrabber (Karine): 38275
 - Lidarr: 8686
-- Music App: 5000
 
 - PhotoPrism: 2342
 

@@ -53,22 +53,37 @@ services:
       - /mnt/storage/media/music/karine:/music:ro
     restart: unless-stopped
 
-  spotdl-web:
-    image: spotdl/spotify-downloader:latest
-    container_name: spotdl-web
-    mem_limit: 2g
-    cpus: 2
-    command: web --host 0.0.0.0 --port 8888
+
+  musicgrabber-arthur:
+    image: g33kphr33k/musicgrabber:latest
+    container_name: musicgrabber-arthur
+    shm_size: '2gb'
     ports:
-      - "8888:8888"
+      - "38274:8080"
     volumes:
-      - ${HOMELAB_DIR}/containers/spotdl/config:/home/spotdl/.spotdl
-      - /mnt/storage/media/music:/music
-    working_dir: /music
+      - ${HOMELAB_DIR}/containers/musicgrabber-arthur/data:/data
+      - /mnt/storage/media/music/arthur:/music
+    environment:
+      - MUSIC_DIR=/music
+      - ENABLE_MUSICBRAINZ=true
+    restart: unless-stopped
+
+  musicgrabber-karine:
+    image: g33kphr33k/musicgrabber:latest
+    container_name: musicgrabber-karine
+    shm_size: '2gb'
+    ports:
+      - "38275:8080"
+    volumes:
+      - ${HOMELAB_DIR}/containers/musicgrabber-karine/data:/data
+      - /mnt/storage/media/music/karine:/music
+    environment:
+      - MUSIC_DIR=/music
+      - ENABLE_MUSICBRAINZ=true
     restart: unless-stopped
 
   lidarr:
-    image: lscr.io/linuxserver/lidarr:latest
+    image: lscr.io/linuxserver/lidarr:nightly
     container_name: lidarr
     mem_limit: 1g
     cpus: 1
@@ -92,23 +107,6 @@ services:
       - stream_default
     restart: unless-stopped
 
-
-  music-app:
-    build: ${HOMELAB_DIR}/containers/music_request_app
-    container_name: music-app
-    mem_limit: 512m
-    cpus: 0.5
-    ports:
-      - "5000:5000"
-    environment:
-      - LIDARR_URL=http://lidarr:8686
-      - LIDARR_API_KEY=830989a7747c4f82a9f96ca4a467afb9
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${HOMELAB_DIR}/containers/music_request_app:/app
-    networks:
-      - default
-    restart: unless-stopped
 
 
 networks:
