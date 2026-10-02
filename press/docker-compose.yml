@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. The Core Reader
   freshrss:
@@ -13,6 +11,7 @@ services:
       CRON_MIN: '3,33'
     volumes:
       - ./data/freshrss:/var/www/FreshRSS/data
+      - ./data/freshrss-extensions:/var/www/FreshRSS/extensions
     deploy:
       resources:
         limits:

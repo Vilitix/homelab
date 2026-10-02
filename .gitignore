@@ -19,6 +19,12 @@ containers/
 /save/local-repo/
 
 
+#agent data
+/agent/*/
+/agent/install.sh
+hermes-*
+SOUL.md
+
 #press data
 /press/data
 *.opml
