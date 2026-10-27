@@ -42,3 +42,7 @@ PRESS / INFORMATION STACK (/home/arthur/homelab/press)
 - RSS-Bridge: 8086
 - Morss: 8087
 - Wallabag: 8088
+
+AGENT STACK (/home/arthur/homelab/agent)
+- Open WebUI: 3080
+- SearXNG: 8888

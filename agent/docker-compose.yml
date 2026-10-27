@@ -17,4 +17,61 @@ services:
       - "5173:5173" # Vite default port
       - "8000:8000" # Python http.server default port
 
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    mem_limit: 1g
+    depends_on:
+      - searxng
+    ports:
+      - "3080:8080"
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    environment:
+      - WEBUI_AUTH=False
+      - OFFLINE_MODE=True
+      - ENABLE_PERSISTENT_CONFIG=False
+      - BYPASS_EMBEDDING_AND_RETRIEVAL=True
+      # Minimal external-provider profile: keep chat + memory + PDF/image attachments, but disable the RAM-heavy optional features.
+      - ENABLE_WEB_SEARCH=False
+      - ENABLE_CODE_EXECUTION=False
+      - ENABLE_TTS=False
+      - ENABLE_AUDIO=False
+      - ENABLE_IMAGE_GENERATION=False
+      - ENABLE_COMMUNITY_SHARING=False
+      - ENABLE_SIGNUP=False
+      - ENABLE_K8S=False
+      - OPENAI_API_BASE_URLS=https://openrouter.ai/api/v1;https://opencode.ai/zen/go/v1
+      - OPENAI_API_KEYS=${OPENROUTER_API_KEY};${OPENCODE_GO_API_KEY}
+      - 'OPENAI_API_CONFIGS={"1":{"headers":{"x-opencode-session":"openwebui"}}}'
+      # --- glibc / BLAS (not OWUI flags, still valid) ---
+      - MALLOC_ARENA_MAX=2
+      - OPENBLAS_NUM_THREADS=1
+      - OMP_NUM_THREADS=1
+      - TOKENIZERS_PARALLELISM=false
+      # --- optional, reduces thread count -> fewer malloc arenas ---
+      - THREAD_POOL_SIZE=4
+    env_file:
+      - .env
 
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
