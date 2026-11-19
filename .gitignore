@@ -17,10 +17,11 @@ containers/
 !/portfolio/docker-compose.yml
 # Restic local backup repository
 /save/local-repo/
-
+*.patch
 
 #agent data
 /agent/*/
+!agent/openpaper
 /agent/install.sh
 hermes-*
 SOUL.md

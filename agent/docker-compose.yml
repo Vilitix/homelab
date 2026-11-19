@@ -1,3 +1,39 @@
+x-openpaper-jobs: &openpaper-jobs
+  image: openpaper-jobs:local
+  build:
+    context: ./openpaper/jobs
+  environment:
+    OPENAI_API_KEY: ${OPENCODE_GO_API_KEY:?set OPENCODE_GO_API_KEY in agent/.env}
+    OPENAI_BASE_URL: https://opencode.ai/zen/go/v1
+    OPENAI_DEFAULT_MODEL: deepseek-v4.1-flash
+    OPENAI_FAST_MODEL: glm-5.3-flash
+    OPENAI_FALLBACK_MODEL: deepseek-v4.1-flash
+    OPENAI_SUPPORTS_PDF_INPUT: "false"
+    OPENAI_EXTRA_HEADERS: '{"x-opencode-session":"openpaper"}'
+    OPENAI_REASONING_EFFORT: low
+    S3_BUCKET_NAME: openpaper
+    CLOUDFLARE_BUCKET_NAME: openpaper
+    S3_ENDPOINT_URL: http://openpaper-minio:9000
+    S3_PUBLIC_BASE_URL: http://${OPENPAPER_HOST:-192.168.1.20}:9000/openpaper
+    AWS_ACCESS_KEY_ID: openpaper
+    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-openpaper-secret}
+    AWS_REGION: us-east-1
+    CELERY_BROKER_URL: pyamqp://guest:guest@openpaper-rabbitmq:5672//
+    CELERY_RESULT_BACKEND: redis://openpaper-redis:6379/0
+    WEBHOOK_BASE_URL: http://openpaper-server:8000
+    JOBS_INTERNAL_SECRET: openpaper-jobs-secret
+    ZOTERO_SYNC_INTERVAL_SECONDS: "3600"
+    LANGFUSE_TRACING_ENVIRONMENT: local-docker
+  volumes:
+    - ./openpaper/jobs/src:/app/src
+    - ./openpaper/jobs/scripts:/app/scripts
+  depends_on:
+    openpaper-rabbitmq:
+      condition: service_healthy
+    openpaper-redis:
+      condition: service_healthy
+  restart: unless-stopped
+
 services:
   gateway:
     image: nousresearch/hermes-agent:latest
@@ -21,7 +57,11 @@ services:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     restart: unless-stopped
-    mem_limit: 1g
+    mem_limit: 2g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       - searxng
     ports:
@@ -33,8 +73,12 @@ services:
       - OFFLINE_MODE=True
       - ENABLE_PERSISTENT_CONFIG=False
       - BYPASS_EMBEDDING_AND_RETRIEVAL=True
-      # Minimal external-provider profile: keep chat + memory + PDF/image attachments, but disable the RAM-heavy optional features.
-      - ENABLE_WEB_SEARCH=False
+      # Minimal external-provider profile: keep chat + PDF/image attachments, but disable the RAM-heavy optional features.
+      - ENABLE_WEB_SEARCH=True
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search
+      - WEB_SEARCH_RESULT_COUNT=5
+      - WEB_SEARCH_CONCURRENT_REQUESTS=10
       - ENABLE_CODE_EXECUTION=False
       - ENABLE_TTS=False
       - ENABLE_AUDIO=False
@@ -42,9 +86,22 @@ services:
       - ENABLE_COMMUNITY_SHARING=False
       - ENABLE_SIGNUP=False
       - ENABLE_K8S=False
-      - OPENAI_API_BASE_URLS=https://openrouter.ai/api/v1;https://opencode.ai/zen/go/v1
-      - OPENAI_API_KEYS=${OPENROUTER_API_KEY};${OPENCODE_GO_API_KEY}
-      - 'OPENAI_API_CONFIGS={"1":{"headers":{"x-opencode-session":"openwebui"}}}'
+      # Memory: off unless explicitly wanted (auto-saves facts + injects them into prompts).
+      - ENABLE_MEMORIES=False
+      - ENABLE_MEMORY_SYSTEM_CONTEXT=False
+      - ENABLE_MEMORY_BACKGROUND_REVIEW=False
+      - USER_PERMISSIONS_FEATURES_MEMORIES=False
+      # Background tasks: stop the extra LLM calls (each one re-ran the reasoning model).
+      - ENABLE_TAGS_GENERATION=False
+      - ENABLE_FOLLOW_UP_GENERATION=False
+      - ENABLE_RETRIEVAL_QUERY_GENERATION=False
+      # Tasks that remain (title/search query) run at low effort. Applies to task calls only, not the main chat.
+      - 'TASK_MODEL_PARAMS={"reasoning_effort":"low"}'
+      - OPENAI_API_BASE_URLS=https://opencode.ai/zen/go/v1
+      - OPENAI_API_KEYS=${OPENCODE_GO_API_KEY}
+      - 'OPENAI_API_CONFIGS={"0":{"headers":{"x-opencode-session":"openwebui"}}}'
+      # Cap SQLite pool: default 512 conns x 2 fds blows the 1024 nofile limit under multi-session.
+      - DATABASE_POOL_SIZE=32
       # --- glibc / BLAS (not OWUI flags, still valid) ---
       - MALLOC_ARENA_MAX=2
       - OPENBLAS_NUM_THREADS=1
@@ -75,3 +132,199 @@ services:
       options:
         max-size: "1m"
         max-file: "1"
+
+  # ---------------------------------------------------------------------------
+  # Open Paper — single-user, OpenCode Go-backed research workbench.
+  # Source is a patched checkout in ./openpaper; see openpaper.patch and
+  # openpaper-setup.sh for the reproducible upstream + patch recipe.
+  # ---------------------------------------------------------------------------
+  openpaper-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: annotated-paper
+    volumes:
+      - openpaper-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d annotated-paper"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  openpaper-rabbitmq:
+    image: rabbitmq:4.1.2-management
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    restart: unless-stopped
+
+  openpaper-redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  openpaper-minio:
+    image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: openpaper
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-openpaper-secret}
+      MINIO_API_CORS_ALLOW_ORIGIN: "*"
+    ports:
+      - "9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - openpaper-minio-data:/data
+    restart: unless-stopped
+
+  openpaper-minio-init:
+    image: amazon/aws-cli:latest
+    depends_on:
+      openpaper-minio:
+        condition: service_started
+    environment:
+      AWS_ACCESS_KEY_ID: openpaper
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-openpaper-secret}
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws --endpoint-url http://openpaper-minio:9000 s3api list-buckets >/dev/null 2>&1; do sleep 1; done
+        aws --endpoint-url http://openpaper-minio:9000 s3 mb s3://openpaper || true
+        aws --endpoint-url http://openpaper-minio:9000 s3api put-bucket-policy --bucket openpaper --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::openpaper/*"]}]}'
+        aws --endpoint-url http://openpaper-minio:9000 s3api put-bucket-cors --bucket openpaper --cors-configuration '{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMethods":["GET","HEAD"],"AllowedHeaders":["*"],"ExposeHeaders":["Content-Length","Content-Range","Accept-Ranges"],"MaxAgeSeconds":3000}]}'
+    restart: "no"
+
+  openpaper-migrate:
+    image: openpaper-server:local
+    build:
+      context: ./openpaper/server
+    command: ["python", "app/scripts/run_migrations.py"]
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@openpaper-postgres:5432/annotated-paper
+    depends_on:
+      openpaper-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  openpaper-server:
+    image: openpaper-server:local
+    build:
+      context: ./openpaper/server
+    command: ["python3", "-m", "app.main"]
+    environment:
+      OPENAI_API_KEY: ${OPENCODE_GO_API_KEY:?set OPENCODE_GO_API_KEY in agent/.env}
+      OPENAI_BASE_URL: https://opencode.ai/zen/go/v1
+      OPENAI_DEFAULT_MODEL: deepseek-v4.1-flash
+      OPENAI_FAST_MODEL: glm-5.3-flash
+      OPENAI_SUPPORTS_PDF_INPUT: "false"
+      OPENAI_EXTRA_HEADERS: '{"x-opencode-session":"openpaper"}'
+      OPENAI_REASONING_EFFORT: low
+      LLM_ENABLED_PROVIDERS: openai
+      LLM_DEFAULT_PROVIDER: openai
+      LLM_FALLBACK_PROVIDER: ""
+      DATABASE_URL: postgresql://postgres:postgres@openpaper-postgres:5432/annotated-paper
+      S3_BUCKET_NAME: openpaper
+      CLOUDFLARE_BUCKET_NAME: openpaper
+      S3_ENDPOINT_URL: http://openpaper-minio:9000
+      S3_PUBLIC_BASE_URL: http://${OPENPAPER_HOST:-192.168.1.20}:9000/openpaper
+      AWS_ACCESS_KEY_ID: openpaper
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-openpaper-secret}
+      AWS_REGION: us-east-1
+      CELERY_BROKER_URL: pyamqp://guest:guest@openpaper-rabbitmq:5672//
+      CELERY_API_URL: http://openpaper-jobs-api:8001
+      WEBHOOK_BASE_URL: http://openpaper-server:8000
+      CLIENT_DOMAIN: http://localhost:${OPENPAPER_CLIENT_PORT:-3100}
+      CORS_ALLOW_ORIGIN_REGEX: ^http://.*:${OPENPAPER_CLIENT_PORT:-3100}
+      API_DOMAIN: http://localhost:${OPENPAPER_SERVER_PORT:-8100}
+      AUTO_AUTH: "true"
+      AUTO_AUTH_EMAIL: arthur@example.com
+      AUTO_AUTH_NAME: Arthur
+      EMAIL_VERIFICATION_CONSOLE: "true"
+      LOCAL_AUTH_SECRET: ${LOCAL_AUTH_SECRET:-}
+      LOCAL_AUTH_EMAIL: arthur@example.com
+      LOCAL_AUTH_NAME: Arthur
+      SUPER_PASSWORD: openpaper-admin
+      ADMIN_SECRET_KEY: openpaper-admin-secret
+      ROOT_EMAIL: admin@example.com
+      DEBUG: "True"
+      LANGFUSE_TRACING_ENVIRONMENT: local-docker
+      UVICORN_RELOAD: "False"
+      PORT: "8000"
+    volumes:
+      - ./openpaper/server/app:/app/app
+      - ./openpaper/server/migrations:/app/migrations
+      - ./openpaper/server/alembic.ini:/app/alembic.ini
+    ports:
+      - "${OPENPAPER_SERVER_PORT:-8100}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/docs').status==200 else 1)\"",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 20s
+    depends_on:
+      openpaper-postgres:
+        condition: service_healthy
+      openpaper-migrate:
+        condition: service_completed_successfully
+      openpaper-minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  openpaper-jobs-api:
+    <<: *openpaper-jobs
+    command: ["./scripts/start_api.sh"]
+    ports:
+      - "${OPENPAPER_JOBS_PORT:-8101}:8001"
+
+  openpaper-jobs-worker:
+    <<: *openpaper-jobs
+    command: ["./scripts/start_worker.sh"]
+    healthcheck:
+      disable: true
+
+  openpaper-jobs-beat:
+    <<: *openpaper-jobs
+    command: ["./scripts/start_beat.sh"]
+    healthcheck:
+      disable: true
+
+  openpaper-client:
+    image: openpaper-client:local
+    build:
+      context: ./openpaper/client
+      dockerfile: Dockerfile.local
+      args:
+        NEXT_PUBLIC_API_PORT: ${OPENPAPER_SERVER_PORT:-8100}
+    environment:
+      NEXT_PUBLIC_API_PORT: ${OPENPAPER_SERVER_PORT:-8100}
+      NEXT_PUBLIC_API_URL: ""
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "${OPENPAPER_CLIENT_PORT:-3100}:3000"
+    depends_on:
+      openpaper-server:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  openpaper-postgres-data:
+    name: openpaper_postgres-data
+  openpaper-minio-data:
+    name: openpaper_minio-data
