@@ -1,0 +1,2469 @@
+diff --git a/.gitignore b/.gitignore
+index 42727f4..321360a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -68,3 +68,12 @@ build_*tex.sh
+ # deliberately COMMITTED. It is manufactured from the PDFs in
+ # server/evals/seed_data/ by `scripts/dev build-fixture`, holds no real user
+ # data, and has to be present for a fresh checkout to come up with usable data.
++
++# Local homelab deployment
++.env
++data/
++postgres-data/
++minio-data/
++server/.env
++jobs/.env
++client/.env.local
+diff --git a/client/Dockerfile.local b/client/Dockerfile.local
+new file mode 100644
+index 0000000..ecf3b4e
+--- /dev/null
++++ b/client/Dockerfile.local
+@@ -0,0 +1,23 @@
++FROM node:24-slim
++
++WORKDIR /app
++
++RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
++
++ENV NEXT_TELEMETRY_DISABLED=1
++
++COPY package.json yarn.lock ./
++RUN yarn install --frozen-lockfile
++
++COPY . .
++
++ARG NEXT_PUBLIC_API_PORT=8100
++ARG NEXT_PUBLIC_API_URL=""
++ENV NEXT_PUBLIC_API_PORT=$NEXT_PUBLIC_API_PORT
++ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
++
++RUN yarn build
++
++EXPOSE 3000
++
++CMD ["yarn", "start"]
+diff --git a/client/src/components/PdfHighlighterViewer.tsx b/client/src/components/PdfHighlighterViewer.tsx
+index 33df994..576d56e 100644
+--- a/client/src/components/PdfHighlighterViewer.tsx
++++ b/client/src/components/PdfHighlighterViewer.tsx
+@@ -260,6 +260,25 @@ function PdfDocumentSync({
+ 	return null;
+ }
+ 
++/**
++ * The PDF lives in object storage on a separate host/port from the app. When
++ * the app is opened through a different address (LAN, Tailscale, localhost),
++ * the stored URL still names the host used at upload time. Re-point the file
++ * host at the browser's current host so the same paper works from any device.
++ */
++function normalizePdfUrl(url: string): string {
++	if (!url || typeof window === "undefined") return url;
++	try {
++		const parsed = new URL(url);
++		if (parsed.hostname !== window.location.hostname) {
++			parsed.hostname = window.location.hostname;
++		}
++		return parsed.toString();
++	} catch {
++		return url;
++	}
++}
++
+ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
+ 	const {
+ 		pdfUrl,
+@@ -1767,7 +1786,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
+ 			>
+ 				<PdfLoader
+ 					key={pdfLoaderKey}
+-					document={effectivePdfUrl}
++					document={normalizePdfUrl(effectivePdfUrl)}
+ 					workerSrc="/pdf.worker.mjs"
+ 					beforeLoad={() => <EnigmaticLoadingExperience />}
+ 					onError={handlePdfError}
+diff --git a/client/src/lib/api.ts b/client/src/lib/api.ts
+index e1ec8e7..8cd03b0 100644
+--- a/client/src/lib/api.ts
++++ b/client/src/lib/api.ts
+@@ -1,4 +1,15 @@
+-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
++const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL;
++const apiPort = process.env.NEXT_PUBLIC_API_PORT || '8100';
++
++// Prefer an explicit build-time URL. Otherwise talk to the same host the page
++// was loaded from, on the API port: this keeps localhost, LAN, and Tailscale
++// access working without rebuilding the image for each hostname.
++const API_BASE_URL =
++    configuredApiUrl && configuredApiUrl.length > 0
++        ? configuredApiUrl
++        : typeof window !== 'undefined'
++          ? `${window.location.protocol}//${window.location.hostname}:${apiPort}`
++          : `http://localhost:${apiPort}`;
+ 
+ export async function fetchFromApi(endpoint: string, options: RequestInit = {}) {
+     const headers: HeadersInit = {};
+diff --git a/jobs/scripts/start_worker.sh b/jobs/scripts/start_worker.sh
+index 2e49e1c..81d13ce 100755
+--- a/jobs/scripts/start_worker.sh
++++ b/jobs/scripts/start_worker.sh
+@@ -17,5 +17,5 @@ python -m celery --app src.celery_app worker \
+     --without-gossip \
+     --without-mingle \
+     --without-heartbeat \
+-    --time-limit=300 \
+-    --soft-time-limit=240
++    --time-limit=2400 \
++    --soft-time-limit=1800
+diff --git a/jobs/src/llm_client.py b/jobs/src/llm_client.py
+index 5e6a987..83f2644 100644
+--- a/jobs/src/llm_client.py
++++ b/jobs/src/llm_client.py
+@@ -1,78 +1,88 @@
++"""OpenAI-compatible LLM client for PDF metadata and data-table extraction.
++
++This replaces the upstream Gemini-only client for single-key self-hosting. All
++calls go to an OpenAI-compatible ``/chat/completions`` endpoint (OpenCode Go in
++the homelab deployment), so the worker needs no Gemini, Anthropic, or sandbox
++credentials to ingest a paper.
+ """
+-Simplified LLM client for metadata extraction.
+-"""
++
++import asyncio
++import base64
+ import json
+ import logging
+ import os
+-import re
+-import io
+-import asyncio
+ import random
+-import httpx
+-from dotenv import load_dotenv
+-
+-load_dotenv()
+-
+-from src.observability import configure_langfuse
+-
+-configure_langfuse()
+-
+-from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
+-
+-GoogleGenAIInstrumentor().instrument()
+-
+-from google import genai
+-from google.genai import types
+-from google.genai.errors import APIError, ClientError, ServerError
+-from langfuse.openai import AsyncOpenAI
+-from typing import Any, Awaitable, Dict, List, Optional, Type, TypeVar, Callable
++import re
++from typing import Any, Awaitable, Callable, Dict, List, Optional, Type, TypeVar
+ 
+-from pydantic import BaseModel, ValidationError, create_model, Field, ConfigDict
++import httpx
++import pymupdf
++from openai import (
++    APIStatusError,
++    APITimeoutError,
++    AsyncOpenAI,
++    InternalServerError,
++    RateLimitError,
++)
++from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
+ 
+-from src.prompts import EXTRACT_COLS_INSTRUCTION, SYSTEM_INSTRUCTIONS_CACHE, EXTRACT_METADATA_PROMPT_TEMPLATE
++from src.prompts import (
++    EXTRACT_COLS_INSTRUCTION,
++    EXTRACT_METADATA_PROMPT_TEMPLATE,
++    SYSTEM_INSTRUCTIONS_CACHE,
++)
+ from src.schemas import (
+-    DataTableRow,
+-    PaperMetadataExtraction,
+-    TitleAuthorsAbstract,
+-    InstitutionsKeywords,
+-    SummaryAndCitations,
+-    Highlights,
+     CellEntry,
+     DataTableCellValue,
++    DataTableRow,
++    Highlights,
++    InstitutionsKeywords,
++    PaperMetadataExtraction,
+     ResponseCitation,
++    SummaryAndCitations,
++    TitleAuthorsAbstract,
+ )
+ from src.utils import retry_llm_operation, time_it
+ 
+ logger = logging.getLogger(__name__)
+ 
++DEFAULT_CHAT_MODEL = os.getenv("OPENAI_DEFAULT_MODEL", "deepseek-v4.1-flash")
++FAST_CHAT_MODEL = os.getenv("OPENAI_FAST_MODEL", "glm-5.3-flash")
++OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPENCODE_GO_API_KEY")
++OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL") or None
++METADATA_FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", DEFAULT_CHAT_MODEL)
+ 
+-def _format_api_error(e: Exception) -> Any:
+-    """Pull the concise 'error' payload out of a genai API error for logging.
+ 
+-    google-genai's APIError stores the raw response JSON on `.details` (see
+-    errors.py) and stringifies as "<code> <status>. <details>", so the full
+-    payload is what bloats the logs. When `.details` is a dict, return its
+-    'error' value; otherwise (e.g. httpx.TimeoutException, or no 'error' key)
+-    fall back to the whole exception.
+-    """
+-    details = getattr(e, "details", None)
+-    if isinstance(details, dict):
+-        return details.get("error", e)
+-    return e
++def _extra_headers() -> Optional[Dict[str, str]]:
++    raw = os.getenv("OPENAI_EXTRA_HEADERS")
++    if not raw:
++        return None
++    try:
++        parsed = json.loads(raw)
++        if isinstance(parsed, dict):
++            return {str(k): str(v) for k, v in parsed.items()}
++    except (TypeError, ValueError):
++        logger.warning("OPENAI_EXTRA_HEADERS is not valid JSON; ignoring it")
++    return None
+ 
+ 
+-# HTTP status codes worth another attempt. Everything else the API returns as a
+-# 4xx is deterministic — a 400 INVALID_ARGUMENT for an oversized prompt, a 403
+-# for a bad key, a 404 for an expired cache — and re-sending the identical
+-# request just burns quota and wall-clock before failing the same way.
+-RETRYABLE_STATUS_CODES = frozenset({408, 429})
++def _create_openai_client(timeout: Optional[float] = None) -> AsyncOpenAI:
++    if not OPENAI_API_KEY:
++        raise ValueError(
++            "OPENAI_API_KEY or OPENCODE_GO_API_KEY environment variable is required"
++        )
++    kwargs: Dict[str, Any] = {
++        "api_key": OPENAI_API_KEY,
++        "base_url": OPENAI_BASE_URL,
++        "default_headers": _extra_headers(),
++    }
++    if timeout is not None:
++        kwargs["timeout"] = timeout
++    return AsyncOpenAI(**kwargs)
+ 
+ 
+ def _strict_json_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+-    """Make a JSON schema meet OpenAI's strict structured outputs: every object
+-    sets additionalProperties to false and lists all its properties as
+-    required, and a $ref carries no sibling keywords. A property that had a
+-    default is now always generated."""
++    """Put a JSON schema in the form OpenAI strict structured outputs require."""
+     defs = schema.get("$defs", {})
+ 
+     def strict(node: Any) -> Any:
+@@ -81,7 +91,6 @@ def _strict_json_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+         if not isinstance(node, dict):
+             return node
+         if "$ref" in node and len(node) > 1:
+-            # Inline the definition, so its siblings (e.g. a description) can stay.
+             target = defs[node["$ref"].split("/")[-1]]
+             node = {**target, **{k: v for k, v in node.items() if k != "$ref"}}
+         result: Dict[str, Any] = {}
+@@ -100,73 +109,55 @@ def _strict_json_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+     return strict(schema)
+ 
+ 
+-def _is_retryable(e: Exception) -> bool:
+-    """Whether re-sending the identical request could plausibly succeed.
++def _response_format(schema: Type[BaseModel]) -> Dict[str, Any]:
++    return {
++        "type": "json_schema",
++        "json_schema": {
++            "name": schema.__name__,
++            "strict": True,
++            "schema": _strict_json_schema(schema.model_json_schema()),
++        },
++    }
+ 
+-    Transport-level failures (timeouts) and server-side errors are transient.
+-    Client errors are not, except for request timeout and rate limiting.
+-    """
+-    if isinstance(e, httpx.TimeoutException):
+-        return True
+-    if isinstance(e, ServerError):
++
++def _is_retryable(e: Exception) -> bool:
++    if isinstance(e, (httpx.TimeoutException, APITimeoutError, RateLimitError, InternalServerError)):
+         return True
+-    if isinstance(e, APIError):
+-        return getattr(e, "code", None) in RETRYABLE_STATUS_CODES
++    if isinstance(e, APIStatusError):
++        return e.status_code in {408, 409, 429, 500, 502, 503, 504}
+     return False
+ 
+ 
+-# Constants
+-DEFAULT_CHAT_MODEL = "gemini-3.8-flash"
+-FAST_CHAT_MODEL = "gemini-3.5-flash-lite"
+-
+-# A metadata step that keeps failing on Gemini's side gets one more attempt on
+-# this model (see _with_model_fallback): OpenAI's, which a Gemini-wide outage
+-# doesn't reach, or Gemini's default model when no OpenAI key is set.
+-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+-METADATA_FALLBACK_MODEL = "gpt-6-luna" if OPENAI_API_KEY else DEFAULT_CHAT_MODEL
+-if not OPENAI_API_KEY:
+-    logger.warning(
+-        f"OPENAI_API_KEY is not set; metadata extraction falls back to "
+-        f"{DEFAULT_CHAT_MODEL} instead of OpenAI"
+-    )
++def _format_api_error(e: Exception) -> Any:
++    return getattr(e, "message", None) or str(e)
+ 
+-CACHE_TTL_SECONDS = 3600
+ 
+-# Gemini rejects caches below 1024 tokens. Below this many characters the content
+-# is likely under that floor, so caching can't help — skip it and inline instead
+-# of making a doomed caches.create call. ~5000 chars (~1024 tokens even for sparse
+-# text at ~5 chars/token) keeps us safely above the floor before we bother caching.
+-CACHE_MIN_CONTENT_CHARS = 5000
+-
+-# Pydantic model type variable
+-T = TypeVar("T", bound=BaseModel)
++def _pdf_text(path: str) -> str:
++    document = pymupdf.open(path)
++    try:
++        return "\n".join(page.get_text() for page in document)
++    finally:
++        document.close()
+ 
+ 
+ class JSONParser:
+-
+     @staticmethod
+     def validate_and_extract_json(json_data: str) -> dict:
+-        """Extract and validate JSON data from various formats"""
+         if not json_data or not isinstance(json_data, str):
+             raise ValueError("Invalid input: empty or non-string data")
+ 
+         json_data = json_data.strip()
+-
+-        # Case 1: Try parsing directly first
+         try:
+             return json.loads(json_data)
+         except json.JSONDecodeError:
+             pass
+ 
+-        # Case 2: Check for code block format
+         if "```" in json_data:
+             code_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", json_data)
+-
+             for block in code_blocks:
+                 block = block.strip()
+                 block = re.sub(r"}\s+\w+\s+}", "}}", block)
+                 block = re.sub(r"}\s+\w+\s+,", "},", block)
+-
+                 try:
+                     return json.loads(block)
+                 except json.JSONDecodeError:
+@@ -178,151 +169,54 @@ class JSONParser:
+         )
+ 
+ 
++T = TypeVar("T", bound=BaseModel)
++
++
+ class AsyncLLMClient:
+-    """
+-    A simple LLM client for metadata extraction.
+-    This is a placeholder implementation that would need to be replaced
+-    with actual LLM API calls (OpenAI, Anthropic, Google, etc.)
+-    """
++    """Small async wrapper around an OpenAI-compatible chat-completions API."""
+ 
+-    DEFAULT_TIMEOUT = 90_000  # 90s for text/cached operations
+-    PDF_TIMEOUT = 120_000    # 120s for PDF file operations
++    DEFAULT_TIMEOUT = 120.0
++    PDF_TIMEOUT = 180.0
+ 
+-    def __init__(
+-        self,
+-        api_key: str,
+-        default_model: Optional[str] = None,
+-    ):
++    def __init__(self, api_key: str, default_model: Optional[str] = None):
+         self.api_key = api_key
+-        self.default_model: str = default_model or DEFAULT_CHAT_MODEL
+-
+-    def _create_client(self, timeout: int = DEFAULT_TIMEOUT) -> genai.Client:
+-        """Create a fresh client instance for thread-safe concurrent calls."""
+-        if not self.api_key:
+-            raise ValueError("API key is not set")
+-        return genai.Client(
+-            api_key=self.api_key,
+-            http_options=types.HttpOptions(timeout=timeout),
+-        )
++        self.default_model = default_model or DEFAULT_CHAT_MODEL
+ 
+-    async def _close_client(self, client: genai.Client) -> None:
+-        """Close the async transport before the task's event loop goes away.
++    def _create_client(self, timeout: Optional[float] = None) -> AsyncOpenAI:
++        return _create_openai_client(timeout=timeout)
+ 
+-        The SDK's AsyncClient.__del__ schedules aclose() at GC time, which in
+-        a Celery worker lands on a *later* task's loop and dies with "Event
+-        loop is closed". Closing explicitly keeps cleanup on the loop that
+-        owns the connections.
+-        """
++    async def _close_client(self, client: AsyncOpenAI) -> None:
+         try:
+-            await client.aio.aclose()
++            await client.close()
+         except Exception as e:
+-            logger.debug(f"Error closing genai client: {e}")
++            logger.debug(f"Error closing OpenAI client: {e}")
+ 
+     async def count_tokens(self, text: str, model: Optional[str] = None) -> int:
+-        """Exact input token count for `text`, as `model` will tokenize it.
+-
+-        countTokens is a separate, free endpoint with its own quota — it costs
+-        no generation tokens. Use it rather than a chars-per-token estimate
+-        whenever a request is near the input window: dense paper text (tables,
+-        math, reference lists, CJK) packs far more tokens per character than
+-        English prose, so a character heuristic under-counts and the request
+-        comes back as a 400 INVALID_ARGUMENT that no retry can fix.
+-        """
+-        client = self._create_client()
+-        try:
+-            response = await client.aio.models.count_tokens(
+-                model=model or self.default_model,
+-                contents=types.Content(
+-                    role='user',
+-                    parts=[types.Part.from_text(text=text)],
+-                ),
+-            )
+-        finally:
+-            await self._close_client(client)
+-
+-        total_tokens = getattr(response, "total_tokens", None)
+-        if total_tokens is None:
+-            raise ValueError("count_tokens returned no total_tokens")
+-        return total_tokens
++        """Conservative token estimate.
+ 
+-    async def create_cache(self, cache_content: str, client: genai.Client, model: Optional[str] = None) -> str:
+-        """Create a cache entry for the given content.
+-
+-        Args:
+-            cache_content (str): The content to cache.
+-            client: The genai client to use.
+-            model: Optional model override. Defaults to self.default_model.
+-
+-        Returns:
+-            str: The cache key for the stored content.
++        The endpoint exposes no free token-count API, and the configured model
++        has a 1M-token window, so a deliberately high estimate is enough to
++        keep the truncation guard honest without another network call.
+         """
+-        cached_content = await client.aio.caches.create(
+-            model=model or self.default_model,
+-            config=types.CreateCachedContentConfig(
+-                contents=types.Content(
+-                    role='user',
+-                    parts=[
+-                        types.Part.from_text(text=cache_content),
+-                        types.Part.from_text(text=SYSTEM_INSTRUCTIONS_CACHE)
+-                    ]
+-                ),
+-                display_name="Paper Metadata Cache",
+-                ttl='3600s'
+-            )
+-        )
+-
+-        if cached_content and cached_content.name:
+-            logger.info(f"Cache created successfully: {cached_content.name}")
+-        else:
+-            logger.error("Failed to create cache entry")
+-            raise ValueError("Cache creation failed")
++        return max(1, len(text) // 3)
+ 
+-        return cached_content.name
++    async def create_cache(
++        self,
++        cache_content: str,
++        client: AsyncOpenAI,
++        model: Optional[str] = None,
++    ) -> Optional[str]:
++        # Context caching is a Gemini-only feature in upstream. The inline path
++        # already carries the paper text, so there is nothing to create here.
++        return None
+ 
+     async def create_file_cache(
+         self,
+         file_path: str,
+-        client: genai.Client,
++        client: AsyncOpenAI,
+         system_instructions: Optional[str] = None,
+-    ):
+-        """Create a cache entry for the given file.
+-
+-        Args:
+-            file_path (str): The path to the file to cache.
+-            client: The genai client to use.
+-
+-        Returns:
+-            str: The cache key for the stored file.
+-        """
+-        # Read the file content
+-        with open(file_path, 'rb') as f:
+-            file_content = f.read()
+-
+-        doc_io = io.BytesIO(file_content)
+-        document = await client.aio.files.upload(
+-            file=doc_io,
+-            config=types.UploadFileConfig(
+-                mime_type='application/pdf',
+-            )
+-        )
+-
+-        cached_content = await client.aio.caches.create(
+-            model=self.default_model,
+-            config=types.CreateCachedContentConfig(
+-                contents=document,
+-                display_name="Paper Metadata Cache",
+-                ttl='3600s',
+-                system_instruction=system_instructions or SYSTEM_INSTRUCTIONS_CACHE
+-            ),
+-        )
+-
+-        if cached_content and cached_content.name:
+-            logger.info(f"File cache created successfully: {cached_content.name}")
+-        else:
+-            logger.error("Failed to create cache entry")
+-            raise ValueError("Cache creation failed")
+-
+-        return cached_content.name
++    ) -> Optional[str]:
++        return None
+ 
+     async def generate_content(
+         self,
+@@ -335,208 +229,158 @@ class AsyncLLMClient:
+         file_path: Optional[str] = None,
+         max_retries: int = 3,
+         base_delay: float = 1.0,
+-        client: Optional[genai.Client] = None,
++        client: Optional[AsyncOpenAI] = None,
+     ) -> str:
+-        """
+-        Generate content using the LLM with automatic retry and exponential backoff.
+-
+-        Args:
+-            prompt: The prompt to send to the LLM
+-            model: Optional specific model to use, defaults to self.default_model
+-            max_retries: Maximum number of retry attempts (default: 3)
+-            base_delay: Base delay in seconds for exponential backoff (default: 1.0)
+-            client: Optional client to use (for concurrent calls)
+-
+-        Returns:
+-            str: The generated content from the LLM
+-        """
+-        if not client:
+-            raise ValueError("Client is required for generate_content")
+-
+-        if not model:
+-            model = self.default_model
+-
+-        parts = []
+-        if image_bytes:
+-            parts.append(types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type or 'image/png'))
+-
++        client = client or self._create_client()
+         if file_path:
+-            with open(file_path, "rb") as f:
+-                file_data = f.read()
+-            parts.append(types.Part.from_bytes(data=file_data, mime_type='application/pdf'))
+-
+-
+-        parts.append(types.Part.from_text(text=prompt))
++            paper_text = await asyncio.to_thread(_pdf_text, file_path)
++            prompt = f"Paper Content:\n\n{paper_text}\n\n{prompt}"
+ 
+-        config = types.GenerateContentConfig(
+-            cached_content=cache_key
+-        )
++        if image_bytes:
++            mime = image_mime_type or "image/png"
++            encoded = base64.b64encode(image_bytes).decode("utf-8")
++            content: Any = [
++                {"type": "text", "text": prompt},
++                {
++                    "type": "image_url",
++                    "image_url": {"url": f"data:{mime};base64,{encoded}"},
++                },
++            ]
++        else:
++            content = prompt
+ 
+-        if schema:
+-            config.response_mime_type = 'application/json'
+-            config.response_schema = schema.model_json_schema()
++        kwargs: Dict[str, Any] = {}
++        if schema is not None:
++            kwargs["response_format"] = _response_format(schema)
++        reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT")
++        if reasoning_effort:
++            kwargs["reasoning_effort"] = reasoning_effort
+ 
+         last_exception: Optional[Exception] = None
+-
+         for attempt in range(max_retries + 1):
+             try:
+-                response = await client.aio.models.generate_content(
+-                    model=model,
+-                    contents=types.Content(
+-                        role='user',
+-                        parts=parts
+-                    ),
+-                    config=config
++                response = await client.chat.completions.create(
++                    model=model or self.default_model,
++                    messages=[{"role": "user", "content": content}],
++                    **kwargs,
+                 )
+-
+-                if response and response.text:
+-                    return response.text
+-
++                text = response.choices[0].message.content
++                if text:
++                    return text
+                 raise ValueError("No content generated from LLM response")
+-
+-            except (ServerError, ClientError, APIError, httpx.TimeoutException) as e:
++            except Exception as e:
+                 last_exception = e
+                 if not _is_retryable(e):
+-                    logger.error(f"Non-retryable LLM API error for generate_content: {_format_api_error(e)}")
++                    logger.error(
++                        "Non-retryable LLM API error for generate_content: %s",
++                        _format_api_error(e),
++                    )
+                     break
+                 if attempt < max_retries:
+-                    # Exponential backoff with jitter
+-                    backoff_time = base_delay * (2 ** attempt) * (0.5 + 0.5 * random.random())
++                    backoff = base_delay * (2**attempt) * (0.5 + 0.5 * random.random())
+                     logger.warning(
+-                        f"LLM API error (attempt {attempt + 1}/{max_retries + 1}): {_format_api_error(e)}. "
+-                        f"Retrying in {backoff_time:.2f}s"
++                        "LLM API error (attempt %d/%d): %s. Retrying in %.2fs",
++                        attempt + 1,
++                        max_retries + 1,
++                        _format_api_error(e),
++                        backoff,
+                     )
+-                    await asyncio.sleep(backoff_time)
+-                else:
+-                    logger.error(f"All {max_retries + 1} attempts failed for generate_content: {_format_api_error(e)}")
++                    await asyncio.sleep(backoff)
+ 
+-        # If we reach here, all retries failed
+         raise last_exception or ValueError("Failed to generate content after all retries")
+ 
+     async def generate_structured(
+         self,
+         prompt: str,
+         schema: Type[T],
+-        client: genai.Client,
++        client: Optional[AsyncOpenAI],
+         model: Optional[str] = None,
+         file_path: Optional[str] = None,
+         cache_key: Optional[str] = None,
+         max_retries: int = 3,
+         base_delay: float = 1.0,
+     ) -> T:
+-        """
+-        Generate content constrained to a Pydantic schema and return a validated instance.
+-
+-        Prefers the SDK's parsed object (response.parsed); falls back to parsing the raw
+-        response text. Retries on transport errors as well as parse/validation failures,
+-        adding a corrective instruction on retry. Logs the raw response if all attempts fail.
+-        """
+-        if not client:
+-            raise ValueError("Client is required for generate_structured")
+-
+-        if not model:
+-            model = self.default_model
+-
+-        base_parts = []
++        client = client or self._create_client()
+         if file_path:
+-            with open(file_path, "rb") as f:
+-                file_data = f.read()
+-            base_parts.append(types.Part.from_bytes(data=file_data, mime_type='application/pdf'))
+-        base_parts.append(types.Part.from_text(text=prompt))
+-
+-        # Passing the Pydantic class (not model_json_schema()) lets the SDK populate response.parsed.
+-        config = types.GenerateContentConfig(
+-            cached_content=cache_key,
+-            response_mime_type='application/json',
+-            response_schema=schema,
+-        )
++            paper_text = await asyncio.to_thread(_pdf_text, file_path)
++            prompt = f"Paper Content:\n\n{paper_text}\n\n{prompt}"
++
++        messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
++        response_format = _response_format(schema)
+ 
+         last_exception: Optional[Exception] = None
+         last_raw: Optional[str] = None
+-
+         for attempt in range(max_retries + 1):
+-            parts = list(base_parts)
+             if attempt > 0 and last_raw is not None:
+-                parts.append(types.Part.from_text(
+-                    text=(
+-                        "Your previous response could not be parsed as valid JSON. "
+-                        "Respond with ONLY a single JSON object matching the schema — "
+-                        "no prose, no markdown code fences, and properly escape any quotes inside string values."
+-                    )
+-                ))
+-
++                messages.append(
++                    {
++                        "role": "user",
++                        "content": (
++                            "Your previous response could not be parsed as valid JSON. "
++                            "Respond with ONLY a single JSON object matching the schema — "
++                            "no prose, no markdown code fences, and properly escape any "
++                            "quotes inside string values."
++                        ),
++                    }
++                )
+             try:
+-                response = await client.aio.models.generate_content(
+-                    model=model,
+-                    contents=types.Content(role='user', parts=parts),
+-                    config=config,
++                request_kwargs: Dict[str, Any] = {"response_format": response_format}
++                reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT")
++                if reasoning_effort:
++                    request_kwargs["reasoning_effort"] = reasoning_effort
++                response = await client.chat.completions.create(
++                    model=model or self.default_model,
++                    messages=messages,
++                    **request_kwargs,
+                 )
+-
+-                parsed = getattr(response, "parsed", None)
+-                if isinstance(parsed, schema):
+-                    return parsed
+-
+-                last_raw = response.text if response else None
++                last_raw = response.choices[0].message.content
+                 if not last_raw:
+                     raise ValueError("No content generated from LLM response")
+-
+-                response_json = JSONParser.validate_and_extract_json(last_raw)
+-                return schema.model_validate(response_json)
+-
+-            except (ServerError, ClientError, APIError, httpx.TimeoutException) as e:
++                parsed = JSONParser.validate_and_extract_json(last_raw)
++                return schema.model_validate(parsed)
++            except (ValueError, ValidationError) as e:
+                 last_exception = e
+-                if not _is_retryable(e):
+-                    logger.error(
+-                        f"Non-retryable LLM API error for generate_structured "
+-                        f"({schema.__name__}): {_format_api_error(e)}"
+-                    )
+-                    break
+                 if attempt < max_retries:
+-                    backoff_time = base_delay * (2 ** attempt) * (0.5 + 0.5 * random.random())
++                    backoff = base_delay * (2**attempt) * (0.5 + 0.5 * random.random())
+                     logger.warning(
+-                        f"LLM API failed (attempt {attempt + 1}/{max_retries + 1}): {_format_api_error(e)}. "
+-                        f"Retrying in {backoff_time:.2f}s"
++                        "Structured parse failed for %s (attempt %d/%d): %s. "
++                        "Retrying in %.2fs",
++                        schema.__name__,
++                        attempt + 1,
++                        max_retries + 1,
++                        e,
++                        backoff,
+                     )
+-                    await asyncio.sleep(backoff_time)
+-                else:
+-                    # Warn: the caller decides whether this is final, and
+-                    # metadata extraction still has a fallback model to try.
+-                    logger.warning(f"All {max_retries + 1} attempts failed for generate_structured: {_format_api_error(e)}")
+-            except (ValueError, ValidationError) as e:
++                    await asyncio.sleep(backoff)
++            except Exception as e:
+                 last_exception = e
++                if not _is_retryable(e):
++                    logger.error(
++                        "Non-retryable LLM API error for generate_structured (%s): %s",
++                        schema.__name__,
++                        _format_api_error(e),
++                    )
++                    break
+                 if attempt < max_retries:
+-                    backoff_time = base_delay * (2 ** attempt) * (0.5 + 0.5 * random.random())
++                    backoff = base_delay * (2**attempt) * (0.5 + 0.5 * random.random())
+                     logger.warning(
+-                        f"Structured parse failed for {schema.__name__} "
+-                        f"(attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {backoff_time:.2f}s"
+-                    )
+-                    await asyncio.sleep(backoff_time)
+-                else:
+-                    logger.error(
+-                        f"All {max_retries + 1} attempts failed to parse structured response for "
+-                        f"{schema.__name__}. Raw response (first 1000 chars): {(last_raw or '')[:1000]!r}"
++                        "LLM API failed (attempt %d/%d): %s. Retrying in %.2fs",
++                        attempt + 1,
++                        max_retries + 1,
++                        _format_api_error(e),
++                        backoff,
+                     )
++                    await asyncio.sleep(backoff)
+ 
+-        raise last_exception or ValueError("Failed to generate structured content after all retries")
++        raise last_exception or ValueError(
++            f"Failed to generate structured content for {schema.__name__}"
++        )
+ 
+ 
+ class PaperOperations(AsyncLLMClient):
+-    """
+-    Simplified LLM client for metadata extraction.
+-    This is a placeholder implementation that would need to be replaced
+-    with actual LLM API calls (OpenAI, Anthropic, Google, etc.)
+-    """
+-
+-    def __init__(self, api_key: str, default_model: Optional[str] = None):
+-        """Initialize the LLM client for paper operations."""
+-        super().__init__(api_key, default_model=default_model)
++    """Paper-specific extraction operations on top of the generic client."""
+ 
+     async def count_metadata_prompt_tokens(self, paper_content: str) -> int:
+-        """Token count for `paper_content` as the metadata extraction model sees it.
+-
+-        Keeps the choice of extraction model (and therefore of tokenizer) inside
+-        this client, so callers can ask "does this fit?" without knowing it.
+-        """
+         return await self.count_tokens(paper_content, model=FAST_CHAT_MODEL)
+ 
+     async def _extract_single_metadata_field(
+@@ -545,65 +389,42 @@ class PaperOperations(AsyncLLMClient):
+         paper_content: str,
+         schema: Type[BaseModel],
+         status_callback: Callable[[str], None],
+-        client: genai.Client,
++        client: AsyncOpenAI,
+         cache_key: Optional[str] = None,
+         llm_model: Optional[str] = None,
+     ) -> T:
+-        """
+-        Helper function to extract a single metadata field.
+-
+-        Args:
+-            model: The Pydantic model for the data to extract.
+-            paper_content: The paper content.
+-            status_callback: Optional function to update task status.
+-            client: The genai client to use.
+-            llm_model: Optional LLM model override.
+-
+-        Returns:
+-            An instance of the provided Pydantic model.
+-        """
+-        prompt = EXTRACT_METADATA_PROMPT_TEMPLATE.format(
+-        )
+-
++        prompt = EXTRACT_METADATA_PROMPT_TEMPLATE
+         if paper_content and not cache_key:
+             prompt = f"Paper Content:\n\n{paper_content}\n\n{prompt}"
+ 
+         instance = await self.generate_structured(
+-            prompt, schema=model, cache_key=cache_key, client=client, model=llm_model
++            prompt,
++            schema=schema,
++            cache_key=cache_key,
++            client=client,
++            model=llm_model,
+         )
+ 
+         if model == SummaryAndCitations:
+-            n_citations = len(getattr(instance, "summary_citations", []))
+-            status_callback(f"Compiled with {n_citations} citations")
++            status_callback(
++                f"Compiled with {len(getattr(instance, 'summary_citations', []))} citations"
++            )
+         elif model == InstitutionsKeywords:
+             keywords = getattr(instance, "keywords", [])
+             institutions = getattr(instance, "institutions", [])
+-            first_keyword = keywords[0] if keywords else ""
+-            if first_keyword:
+-                status_callback(
+-                    f"Building on {first_keyword} context"
+-                )
++            if keywords:
++                status_callback(f"Building on {keywords[0]} context")
+             elif institutions:
+-                institutions = getattr(instance, "institutions", [])
+-                first_institution = institutions[0] if institutions else ""
+-                status_callback(
+-                    f"Adding context from institution: {first_institution}"
+-                )
++                status_callback(f"Adding context from institution: {institutions[0]}")
+             else:
+                 status_callback("Processing without keyword data")
+         elif model == Highlights:
+-            highlights = getattr(instance, "highlights", [])
+-            if highlights:
+-                status_callback(
+-                    f"Formulated {len(highlights)} annotations"
+-                )
+-            else:
+-                status_callback("No annotations extracted")
+-        elif model == TitleAuthorsAbstract:
+-            title = getattr(instance, "title", "")
+             status_callback(
+-                f"Reading {title if title else 'untitled paper'}"
++                f"Formulated {len(getattr(instance, 'highlights', []))} annotations"
+             )
++        elif model == TitleAuthorsAbstract:
++            title = getattr(instance, "title", "")
++            status_callback(f"Reading {title if title else 'untitled paper'}")
+         else:
+             status_callback(f"Successfully extracted {model.__name__}")
+ 
+@@ -612,11 +433,6 @@ class PaperOperations(AsyncLLMClient):
+     def _with_model_fallback(
+         self, extract: Callable[..., Awaitable[T]], schema: Type[T], job_id: str
+     ) -> Callable[..., Awaitable[T]]:
+-        """Wrap a metadata extraction step so that, once its retries run out on
+-        an error that is Gemini's rather than the request's (5xx, 429, timeout),
+-        it runs once more on METADATA_FALLBACK_MODEL.
+-        """
+-
+         async def run(**kwargs: Any) -> T:
+             try:
+                 return await extract(**kwargs)
+@@ -624,53 +440,39 @@ class PaperOperations(AsyncLLMClient):
+                 if not _is_retryable(e):
+                     raise
+                 logger.warning(
+-                    f"Metadata step {schema.__name__} failed on {kwargs.get('llm_model')} "
+-                    f"for job {job_id}: {_format_api_error(e)}. "
+-                    f"Retrying on {METADATA_FALLBACK_MODEL}"
++                    "Metadata step %s failed on %s for job %s: %s. Retrying on %s",
++                    schema.__name__,
++                    kwargs.get("llm_model"),
++                    job_id,
++                    _format_api_error(e),
++                    METADATA_FALLBACK_MODEL,
+                 )
+-            if OPENAI_API_KEY:
+-                return await self._extract_with_openai(schema, kwargs["paper_content"])
+-            # Inline, since a context cache only serves the model it was made for.
+-            return await extract(
+-                **{**kwargs, "cache_key": None, "llm_model": METADATA_FALLBACK_MODEL}
+-            )
++            return await self._extract_with_openai(schema, kwargs["paper_content"])
+ 
+         return run
+ 
+     async def _extract_with_openai(self, schema: Type[T], paper_content: str) -> T:
+-        """Extract one metadata step on METADATA_FALLBACK_MODEL. The paper goes
+-        inline, with the same instructions the Gemini context cache carries."""
+-        async with AsyncOpenAI(api_key=OPENAI_API_KEY) as client:
+-            response = await client.chat.completions.create(
++        client = self._create_client()
++        try:
++            return await self.generate_structured(
++                f"Paper Content:\n\n{paper_content}\n\n{EXTRACT_METADATA_PROMPT_TEMPLATE}",
++                schema=schema,
++                client=client,
+                 model=METADATA_FALLBACK_MODEL,
+-                messages=[
+-                    {"role": "system", "content": SYSTEM_INSTRUCTIONS_CACHE},
+-                    {
+-                        "role": "user",
+-                        "content": f"Paper Content:\n\n{paper_content}\n\n{EXTRACT_METADATA_PROMPT_TEMPLATE}",
+-                    },
+-                ],
+-                response_format={
+-                    "type": "json_schema",
+-                    "json_schema": {
+-                        "name": schema.__name__,
+-                        "strict": True,
+-                        "schema": _strict_json_schema(schema.model_json_schema()),
+-                    },
+-                },
+             )
+-        return schema.model_validate_json(response.choices[0].message.content or "")
++        finally:
++            await self._close_client(client)
+ 
+     @retry_llm_operation(max_retries=3, delay=1.0)
+     async def extract_title_authors_abstract(
+         self,
+         paper_content: str,
+         status_callback: Callable[[str], None],
+-        client: genai.Client,
++        client: AsyncOpenAI,
+         cache_key: Optional[str] = None,
+         llm_model: Optional[str] = None,
+     ) -> TitleAuthorsAbstract:
+-        result = await self._extract_single_metadata_field(
++        return await self._extract_single_metadata_field(
+             model=TitleAuthorsAbstract,
+             cache_key=cache_key,
+             schema=TitleAuthorsAbstract,
+@@ -679,14 +481,13 @@ class PaperOperations(AsyncLLMClient):
+             client=client,
+             llm_model=llm_model,
+         )
+-        return result
+ 
+     @retry_llm_operation(max_retries=3, delay=1.0)
+     async def extract_institutions_keywords(
+         self,
+         paper_content: str,
+         status_callback: Callable[[str], None],
+-        client: genai.Client,
++        client: AsyncOpenAI,
+         cache_key: Optional[str] = None,
+         llm_model: Optional[str] = None,
+     ) -> InstitutionsKeywords:
+@@ -705,11 +506,11 @@ class PaperOperations(AsyncLLMClient):
+         self,
+         paper_content: str,
+         status_callback: Callable[[str], None],
+-        client: genai.Client,
++        client: AsyncOpenAI,
+         cache_key: Optional[str] = None,
+         llm_model: Optional[str] = None,
+     ) -> SummaryAndCitations:
+-        result = await self._extract_single_metadata_field(
++        return await self._extract_single_metadata_field(
+             model=SummaryAndCitations,
+             cache_key=cache_key,
+             schema=SummaryAndCitations,
+@@ -718,23 +519,22 @@ class PaperOperations(AsyncLLMClient):
+             client=client,
+             llm_model=llm_model,
+         )
+-        return result
+ 
+     @retry_llm_operation(max_retries=3, delay=1.0)
+     async def extract_highlights(
+         self,
+         paper_content: str,
+         status_callback: Callable[[str], None],
+-        client: genai.Client,
++        client: AsyncOpenAI,
+         cache_key: Optional[str] = None,
+         llm_model: Optional[str] = None,
+     ) -> Highlights:
+         return await self._extract_single_metadata_field(
+             model=Highlights,
+-            paper_content=paper_content,
+-            status_callback=status_callback,
+             cache_key=cache_key,
+             schema=Highlights,
++            paper_content=paper_content,
++            status_callback=status_callback,
+             client=client,
+             llm_model=llm_model,
+         )
+@@ -742,97 +542,76 @@ class PaperOperations(AsyncLLMClient):
+     async def extract_paper_metadata(
+         self,
+         paper_content: str,
+-        job_id: str,  # Add job_id here
++        job_id: str,
+         status_callback: Optional[Callable[[str], None]] = None,
+     ) -> PaperMetadataExtraction:
+-        """
+-        Extract metadata from paper content using LLM.
+-
+-        Args:
+-            paper_content: The extracted text content from the PDF
+-            status_callback: Optional function to update task status
+-
+-        Returns:
+-            PaperMetadataExtraction: Extracted metadata
+-        """
++        status_callback = status_callback or (lambda _status: None)
+         async with time_it("Extracting paper metadata from LLM", job_id=job_id):
+             extraction_model = FAST_CHAT_MODEL
+-
+-            # Create a fresh client for this operation
+             client = self._create_client()
+-
+             try:
+-                # Caching only pays off (and is only accepted by Gemini) above the
+-                # 1024-token floor; for small papers, skip straight to inline.
+-                if len(paper_content) < CACHE_MIN_CONTENT_CHARS:
+-                    logger.info(
+-                        f"Paper content ({len(paper_content)} chars) below cache floor; "
+-                        f"using inline extraction for job {job_id}"
+-                    )
+-                    cache_key = None
+-                else:
+-                    try:
+-                        async with time_it("Creating cache for paper content", job_id=job_id):
+-                            cache_key = await self.create_cache(paper_content, client, model=extraction_model)
+-                    except Exception as e:
+-                        # Inline fallback always covers us, so a cache miss is a warning, not a page.
+-                        logger.warning(f"Failed to create cache, falling back to inline extraction: {_format_api_error(e)}")
+-                        cache_key = None
+-
+-                # Run all extraction tasks concurrently
+-                async with time_it("Running all metadata extraction tasks concurrently", job_id=job_id):
++                async with time_it(
++                    "Running all metadata extraction tasks concurrently", job_id=job_id
++                ):
+                     tasks = [
+-                        asyncio.create_task(time_it("Extracting title, authors, and abstract", job_id=job_id)(
++                        asyncio.create_task(
+                             self._with_model_fallback(
+-                                self.extract_title_authors_abstract, TitleAuthorsAbstract, job_id
++                                self.extract_title_authors_abstract,
++                                TitleAuthorsAbstract,
++                                job_id,
++                            )(
++                                paper_content=paper_content,
++                                cache_key=None,
++                                status_callback=status_callback,
++                                client=client,
++                                llm_model=extraction_model,
+                             )
+-                        )(
+-                            paper_content=paper_content,
+-                            cache_key=cache_key,
+-                            status_callback=status_callback,
+-                            client=client,
+-                            llm_model=extraction_model,
+-                        )),
+-                        asyncio.create_task(time_it("Extracting institutions and keywords", job_id=job_id)(
++                        ),
++                        asyncio.create_task(
+                             self._with_model_fallback(
+-                                self.extract_institutions_keywords, InstitutionsKeywords, job_id
++                                self.extract_institutions_keywords,
++                                InstitutionsKeywords,
++                                job_id,
++                            )(
++                                paper_content=paper_content,
++                                cache_key=None,
++                                status_callback=status_callback,
++                                client=client,
++                                llm_model=extraction_model,
+                             )
+-                        )(
+-                            paper_content=paper_content,
+-                            cache_key=cache_key,
+-                            status_callback=status_callback,
+-                            client=client,
+-                            llm_model=extraction_model,
+-                        )),
+-                        asyncio.create_task(time_it("Extracting summary and citations", job_id=job_id)(
++                        ),
++                        asyncio.create_task(
+                             self._with_model_fallback(
+-                                self.extract_summary_and_citations, SummaryAndCitations, job_id
++                                self.extract_summary_and_citations,
++                                SummaryAndCitations,
++                                job_id,
++                            )(
++                                paper_content=paper_content,
++                                cache_key=None,
++                                status_callback=status_callback,
++                                client=client,
++                                llm_model=extraction_model,
+                             )
+-                        )(
+-                            paper_content=paper_content,
+-                            cache_key=cache_key,
+-                            status_callback=status_callback,
+-                            client=client,
+-                            llm_model=extraction_model,
+-                        )),
+-                        asyncio.create_task(time_it("Extracting highlights", job_id=job_id)(
++                        ),
++                        asyncio.create_task(
+                             self._with_model_fallback(
+-                                self.extract_highlights, Highlights, job_id
++                                self.extract_highlights,
++                                Highlights,
++                                job_id,
++                            )(
++                                paper_content=paper_content,
++                                cache_key=None,
++                                status_callback=status_callback,
++                                client=client,
++                                llm_model=extraction_model,
+                             )
+-                        )(
+-                            paper_content=paper_content,
+-                            cache_key=cache_key,
+-                            status_callback=status_callback,
+-                            client=client,
+-                            llm_model=extraction_model,
+-                        )),
++                        ),
+                     ]
++                    results = await asyncio.gather(
++                        *[asyncio.shield(task) for task in tasks],
++                        return_exceptions=True,
++                    )
+ 
+-                    # Use shield to prevent task cancellation during cleanup
+-                    shielded_tasks = [asyncio.shield(task) for task in tasks]
+-                    results = await asyncio.gather(*shielded_tasks, return_exceptions=True)
+-
+-                # Process results and handle potential errors
+                 (
+                     title_authors_abstract,
+                     institutions_keywords,
+@@ -840,58 +619,31 @@ class PaperOperations(AsyncLLMClient):
+                     highlights,
+                 ) = results
+ 
+-                # gather(return_exceptions=True) hands back Exception objects in
+-                # place of failed results. Without this, getattr() below would
+-                # silently coerce a failed subtask into empty defaults, masking
+-                # the real error (e.g. an empty title surfacing downstream as a
+-                # generic "Failed to extract metadata from PDF"). Log every
+-                # failure with its traceback so the actual cause is visible.
+-                subtask_labels = (
+-                    "title_authors_abstract",
+-                    "institutions_keywords",
+-                    "summary_and_citations",
+-                    "highlights",
+-                )
+-                failed_subtasks = [
++                failed = [
+                     (label, result)
+-                    for label, result in zip(subtask_labels, results)
++                    for label, result in zip(
++                        (
++                            "title_authors_abstract",
++                            "institutions_keywords",
++                            "summary_and_citations",
++                            "highlights",
++                        ),
++                        results,
++                    )
+                     if isinstance(result, BaseException)
+                 ]
+-                if failed_subtasks:
+-                    # The four subtasks share content/cache/model and differ only by
+-                    # schema, so a failure common to all of them usually lives in the
+-                    # shared request. Log that shape (without dumping paper content) so
+-                    # we can see what an "invalid" request actually looks like — size,
+-                    # inline-vs-cached path, model, and any odd characters in the text.
+-                    non_printable = sum(
+-                        1 for c in paper_content
+-                        if not c.isprintable() and c not in "\n\r\t"
+-                    )
++                for label, result in failed:
+                     logger.error(
+-                        "Metadata extraction failed for job %s [%d/%d subtasks failed]: "
+-                        "model=%s, path=%s, paper_content_chars=%d, non_printable_chars=%d",
++                        "Metadata subtask %r failed for job %s: %s",
++                        label,
+                         job_id,
+-                        len(failed_subtasks),
+-                        len(subtask_labels),
+-                        extraction_model or self.default_model,
+-                        "inline" if cache_key is None else "cached",
+-                        len(paper_content),
+-                        non_printable,
+-                    )
+-                for label, result in failed_subtasks:
+-                    logger.error(
+-                        f"Metadata subtask '{label}' failed for job {job_id}: {result}",
++                        result,
+                         exc_info=result,
+                     )
+ 
+-                # Title/authors/abstract is the critical subtask — without it the
+-                # paper is unusable. Re-raise its real error instead of returning
+-                # an object with an empty title. The other subtasks can degrade
+-                # gracefully to their defaults via getattr() below.
+                 if isinstance(title_authors_abstract, BaseException):
+                     raise title_authors_abstract
+ 
+-                # Combine the results into the final metadata object
+                 return PaperMetadataExtraction(
+                     title=getattr(title_authors_abstract, "title", ""),
+                     authors=getattr(title_authors_abstract, "authors", []),
+@@ -905,11 +657,9 @@ class PaperOperations(AsyncLLMClient):
+                     highlights=getattr(highlights, "highlights", []),
+                     publish_date=getattr(title_authors_abstract, "publish_date", None),
+                 )
+-
+             except Exception as e:
+                 logger.error(f"Error extracting metadata: {e}", exc_info=True)
+-                if status_callback:
+-                    status_callback(f"Error during metadata extraction: {e}")
++                status_callback(f"Error during metadata extraction: {e}")
+                 raise ValueError(f"Failed to extract metadata: {str(e)}")
+             finally:
+                 await self._close_client(client)
+@@ -921,40 +671,24 @@ class PaperOperations(AsyncLLMClient):
+         paper_id: str,
+         list_columns: Optional[List[str]] = None,
+     ) -> DataTableRow:
+-        """
+-        Extract structured data table from paper content.
+-
+-        Args:
+-            columns: List of column names for the data table
+-            file_path: The file path to the PDF
+-            list_columns: Subset of columns extracted as collections (one
+-                cited entry per instance found) rather than single values
+-        Returns:
+-            str: JSON string representing the data table
+-        """
+-        # Create a fresh client with longer timeout since we're sending full PDFs
+         client = self._create_client(timeout=self.PDF_TIMEOUT)
+         list_column_set = set(list_columns or [])
+ 
+         try:
+-            # Map each column to a safe field name. User-supplied column names can contain
+-            # quotes, apostrophes, accents, or spaces (e.g. Italian columns), which become
+-            # fragile JSON property names that the model struggles to generate correctly.
+             aliases: Dict[str, str] = {f"col_{i}": col for i, col in enumerate(columns)}
+-
+             cols_str = "\n".join(
+                 f'- {alias}: "{col}"'
+-                + (" [LIST: one keyed entry per instance found in the paper]" if col in list_column_set else "")
++                + (
++                    " [LIST: one keyed entry per instance found in the paper]"
++                    if col in list_column_set
++                    else ""
++                )
+                 for alias, col in aliases.items()
+             )
+             prompt = EXTRACT_COLS_INSTRUCTION.format(
+-                cols_str=cols_str,
+-                n_cols=len(columns)
++                cols_str=cols_str, n_cols=len(columns)
+             )
+ 
+-            # The extraction model must only ever produce value + citations —
+-            # DataTableCellValue also carries fields the calculator owns
+-            # (entries), which must not appear in the LLM's output schema.
+             class ExtractedCell(BaseModel):
+                 value: str
+                 citations: List[ResponseCitation] = []
+@@ -970,22 +704,29 @@ class PaperOperations(AsyncLLMClient):
+                 value: str
+                 citations: List[ResponseCitation] = []
+ 
+-            # Create the dynamic schema that matches DataTableRow structure.
+-            # Scalar columns map to one cell; list columns to a list of cells.
+             field_definitions: Dict[str, Any] = {
+                 alias: (
+-                    (List[ExtractedEntry], Field(description=f"One keyed entry per instance found for column: {col!r}"))
++                    (
++                        List[ExtractedEntry],
++                        Field(
++                            description=(
++                                "One keyed entry per instance found for column: "
++                                f"{col!r}"
++                            )
++                        ),
++                    )
+                     if col in list_column_set
+-                    else (ExtractedCell, Field(description=f"Value and citations for column: {col!r}"))
++                    else (
++                        ExtractedCell,
++                        Field(description=f"Value and citations for column: {col!r}"),
++                    )
+                 )
+                 for alias, col in aliases.items()
+             }
+-
+-            # Create the values model that enforces all column names as required fields
+             ValuesModel = create_model(
+-                'ValuesModel',
+-                __config__=ConfigDict(),  # Prevent extra fields
+-                **field_definitions
++                "ValuesModel",
++                __config__=ConfigDict(),
++                **field_definitions,
+             )
+ 
+             values_instance = await self.generate_structured(
+@@ -996,7 +737,6 @@ class PaperOperations(AsyncLLMClient):
+                 client=client,
+             )
+ 
+-            # Map aliased fields back to the original column names.
+             values_dict: Dict[str, DataTableCellValue] = {}
+             for alias, col in aliases.items():
+                 extracted = getattr(values_instance, alias)
+@@ -1011,11 +751,14 @@ class PaperOperations(AsyncLLMClient):
+                         if e.value.strip() and e.value.strip().upper() != "N/A"
+                     ]
+                     values_dict[col] = DataTableCellValue(
+-                        value="; ".join(
+-                            f"{e.key}: {e.value}" if e.key else e.value for e in entries
+-                        )
+-                        if entries
+-                        else "N/A",
++                        value=(
++                            "; ".join(
++                                f"{e.key}: {e.value}" if e.key else e.value
++                                for e in entries
++                            )
++                            if entries
++                            else "N/A"
++                        ),
+                         citations=[],
+                         entries=entries,
+                     )
+@@ -1024,11 +767,7 @@ class PaperOperations(AsyncLLMClient):
+                         value=extracted.value, citations=extracted.citations
+                     )
+ 
+-            # Create and return the DataTableRow
+-            return DataTableRow(
+-                paper_id=paper_id,
+-                values=values_dict
+-            )
++            return DataTableRow(paper_id=paper_id, values=values_dict)
+         except Exception as e:
+             logger.error(f"Error extracting data table: {str(e)}", exc_info=True)
+             raise ValueError(f"Failed to extract DT for paper {paper_id}: {str(e)}")
+@@ -1036,11 +775,9 @@ class PaperOperations(AsyncLLMClient):
+             await self._close_client(client)
+ 
+ 
+-# Create a single instance to use throughout the application
+-api_key = os.getenv("GOOGLE_API_KEY")
+-
++api_key = OPENAI_API_KEY
+ if not api_key:
+-    raise ValueError("GOOGLE_API_KEY environment variable is not set")
++    raise ValueError("OPENAI_API_KEY or OPENCODE_GO_API_KEY environment variable is not set")
+ 
+ llm_client = PaperOperations(api_key=api_key, default_model=DEFAULT_CHAT_MODEL)
+ fast_llm_client = PaperOperations(api_key=api_key, default_model=FAST_CHAT_MODEL)
+diff --git a/jobs/src/pdf_processor.py b/jobs/src/pdf_processor.py
+index be2831d..a5ee096 100644
+--- a/jobs/src/pdf_processor.py
++++ b/jobs/src/pdf_processor.py
+@@ -298,7 +298,7 @@ async def process_pdf_file(
+                     metadata.publish_date = None
+ 
+         # Generate file URL from the existing S3 object key
+-        file_url = f"https://{s3_service.cloudflare_bucket_name}/{s3_object_key}"
++        file_url = s3_service.public_url(s3_object_key)
+         logger.info(f"PDF already uploaded to S3: {file_url}")
+ 
+         if isinstance(preview_result, Exception):
+diff --git a/jobs/src/s3_service.py b/jobs/src/s3_service.py
+index 4dc5874..2fb6ac7 100644
+--- a/jobs/src/s3_service.py
++++ b/jobs/src/s3_service.py
+@@ -7,6 +7,7 @@ import uuid
+ from typing import Tuple
+ 
+ import boto3 # type: ignore
++from botocore.config import Config # type: ignore
+ from botocore.exceptions import ClientError # type: ignore
+ 
+ logger = logging.getLogger(__name__)
+@@ -17,6 +18,8 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
+ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+ S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
+ CLOUDFLARE_BUCKET_NAME = os.environ.get("CLOUDFLARE_BUCKET_NAME")
++S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
++S3_PUBLIC_BASE_URL = os.environ.get("S3_PUBLIC_BASE_URL")
+ UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
+ 
+ 
+@@ -30,10 +33,19 @@ class S3Service:
+             aws_access_key_id=AWS_ACCESS_KEY_ID,
+             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+             region_name=AWS_REGION,
++            endpoint_url=S3_ENDPOINT_URL or None,
++            config=Config(
++                s3={"addressing_style": "path"} if S3_ENDPOINT_URL else {}
++            ),
+         )
+         self.bucket_name = S3_BUCKET_NAME
+         self.cloudflare_bucket_name = CLOUDFLARE_BUCKET_NAME
+ 
++    def public_url(self, object_key: str) -> str:
++        if S3_PUBLIC_BASE_URL:
++            return f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{object_key.lstrip('/')}"
++        return f"https://{self.cloudflare_bucket_name}/{object_key}"
++
+     def download_file_to_bytes(self, object_key: str) -> bytes:
+         """Download a file from S3 and return its content as bytes
+ 
+@@ -77,7 +89,7 @@ class S3Service:
+             Body=file_bytes,
+             ContentType=content_type,
+         )
+-        file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
++        file_url = self.public_url(object_key)
+         return object_key, file_url
+ 
+     def upload_any_file(
+@@ -111,7 +123,7 @@ class S3Service:
+                 )
+ 
+             # Generate the URL for the uploaded file
+-            file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
++            file_url = self.public_url(object_key)
+ 
+             return object_key, file_url
+         except ClientError as e:
+diff --git a/scripts/auth-link.sh b/scripts/auth-link.sh
+new file mode 100755
+index 0000000..dd72e5a
+--- /dev/null
++++ b/scripts/auth-link.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++set -euo pipefail
++AGENT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
++cd "$AGENT_DIR"
++
++SECRET="$(grep '^LOCAL_AUTH_SECRET=' .env | cut -d= -f2-)"
++PORT="${OPENPAPER_SERVER_PORT:-8100}"
++HOST="${OPENPAPER_HOST:-192.168.1.20}"
++
++echo "Local login (open in the browser):"
++echo "  http://localhost:${PORT}/api/auth/local?secret=${SECRET}"
++echo "  http://${HOST}:${PORT}/api/auth/local?secret=${SECRET}"
++echo
++echo "This link sets the session cookie and redirects to the app."
+diff --git a/scripts/login.sh b/scripts/login.sh
+new file mode 100755
+index 0000000..eae7df7
+--- /dev/null
++++ b/scripts/login.sh
+@@ -0,0 +1,39 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++AGENT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
++cd "$AGENT_DIR"
++
++EMAIL="${1:-arthur@example.com}"
++NAME="${2:-Arthur}"
++USER_ID="11111111-1111-4111-8111-111111111111"
++SESSION_ID="$(cat /proc/sys/kernel/random/uuid)"
++TOKEN="$(openssl rand -hex 32)"
++CLIENT_PORT="${OPENPAPER_CLIENT_PORT:-3100}"
++
++docker compose --project-directory "$AGENT_DIR" -f "$AGENT_DIR/docker-compose.yml" exec -T openpaper-postgres psql -U postgres -d annotated-paper -v ON_ERROR_STOP=1 -q <<SQL
++INSERT INTO users (id, email, name, is_active, is_admin, is_blocked, auth_provider, provider_user_id, is_email_verified)
++VALUES ('$USER_ID', '$EMAIL', '$NAME', true, true, false, 'email', '$EMAIL', true)
++ON CONFLICT (id) DO UPDATE SET
++  email = EXCLUDED.email,
++  name = EXCLUDED.name,
++  is_active = true,
++  is_admin = true,
++  is_blocked = false,
++  is_email_verified = true;
++
++DELETE FROM sessions WHERE user_id = '$USER_ID' AND expires_at < now();
++
++INSERT INTO sessions (id, user_id, token, expires_at)
++VALUES ('$SESSION_ID', '$USER_ID', '$TOKEN', now() + interval '30 days');
++SQL
++
++cat <<EOF
++Open Paper: http://localhost:${CLIENT_PORT}
++
++Paste this in the browser console on that page, then reload:
++
++document.cookie = "session_token=${TOKEN}; path=/"; location.reload()
++
++Signed in as: ${EMAIL}
++EOF
+diff --git a/server/app/api/auth_api.py b/server/app/api/auth_api.py
+index 9d00bcb..1c79b97 100644
+--- a/server/app/api/auth_api.py
++++ b/server/app/api/auth_api.py
+@@ -90,6 +90,70 @@ async def get_me(
+     return AuthResponse(success=True, message="User found", user=current_user)
+ 
+ 
++LOCAL_AUTH_SECRET = os.getenv("LOCAL_AUTH_SECRET")
++LOCAL_AUTH_EMAIL = os.getenv("LOCAL_AUTH_EMAIL", "arthur@example.com")
++LOCAL_AUTH_NAME = os.getenv("LOCAL_AUTH_NAME", "Arthur")
++
++
++@auth_router.get("/local")
++async def local_login(
++    secret: str = Query(...),
++    request: Request = None,
++    db: Session = Depends(get_db),
++):
++    """Secret-guarded login for self-hosted instances without a mail provider.
++
++    Disabled unless LOCAL_AUTH_SECRET is set. The secret is a bearer value, so
++    treat the link like a password.
++    """
++    if not LOCAL_AUTH_SECRET or not secrets.compare_digest(secret, LOCAL_AUTH_SECRET):
++        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
++
++    email = normalize_email(LOCAL_AUTH_EMAIL)
++    if not email:
++        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
++
++    db_user = user_crud.get_by_email_and_provider(db, email=email, provider="email")
++    if not db_user:
++        db_user = user_crud.create_email_user(db, email=email, name=LOCAL_AUTH_NAME)
++        db_user = user_crud.verify_email(db, user=db_user)
++    elif not db_user.is_email_verified:
++        db_user = user_crud.verify_email(db, user=db_user)
++    if not db_user.is_active:
++        db_user.is_active = True
++        db.add(db_user)
++        db.commit()
++        db.refresh(db_user)
++
++    session = user_crud.create_session(
++        db=db,
++        user_id=db_user.id,
++        user_agent=request.headers.get("user-agent") if request else None,
++        ip_address=request.client.host if request and request.client else None,
++    )
++
++    # Keep the browser on the hostname it used to reach the API. A link opened
++    # via the LAN/Tailscale address must not redirect to localhost on the
++    # viewer's own machine.
++    redirect_base = client_domain
++    if request is not None:
++        request_host = (request.headers.get("host") or "").split(":")[0]
++        if request_host:
++            from urllib.parse import urlparse
++
++            parsed = urlparse(client_domain)
++            client_port = parsed.port or 3100
++            redirect_base = f"{request.url.scheme}://{request_host}:{client_port}"
++
++    response = RedirectResponse(
++        url=f"{redirect_base}/auth/callback?success=true", status_code=302
++    )
++    set_session_cookie(
++        response, token=str(session.token), expires_at=session.expires_at
++    )
++    return response
++
++
+ @auth_router.patch("/profile", response_model=AuthResponse)
+ async def update_profile(
+     request: ProfileUpdateRequest,
+diff --git a/server/app/api/message_api.py b/server/app/api/message_api.py
+index d66d7d8..6ffc794 100644
+--- a/server/app/api/message_api.py
++++ b/server/app/api/message_api.py
+@@ -22,6 +22,7 @@ from app.database.database import get_db
+ from app.database.models import Annotation, ConversableType
+ from app.database.telemetry import track_event
+ from app.llm.base import LLMProvider
++from app.llm.provider import default_provider
+ from app.llm.citation_handler import CitationHandler
+ from app.llm.operations import operations
+ from app.llm.paper_operations import PaperNotFoundError
+@@ -441,7 +442,7 @@ async def chat_message_multipaper(
+                     conversation_id=request.conversation_id,
+                     question=request.user_query,
+                     current_user=current_user,
+-                    llm_provider=LLMProvider.GEMINI,
++                    llm_provider=default_provider(),
+                     user_references=request.user_references,
+                     db=db,
+                     project_id=request.project_id,
+diff --git a/server/app/api/subscription/config.py b/server/app/api/subscription/config.py
+index e1ad9d0..aef640f 100644
+--- a/server/app/api/subscription/config.py
++++ b/server/app/api/subscription/config.py
+@@ -4,9 +4,10 @@ from enum import Enum
+ 
+ import stripe
+ 
++# Optional: a self-hosted deployment can use every reading/research feature
++# without billing. Endpoints that need Stripe fail when called, rather than
++# preventing the whole application from importing.
+ STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+-if not STRIPE_API_KEY:
+-    raise ValueError("STRIPE_API_KEY environment variable is not set")
+ 
+ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+ 
+@@ -14,7 +15,7 @@ MONTHLY_PRICE_ID = os.getenv("STRIPE_MONTHLY_PRICE_ID")
+ YEARLY_PRICE_ID = os.getenv("STRIPE_YEARLY_PRICE_ID")
+ YOUR_DOMAIN = os.getenv("CLIENT_DOMAIN", "http://localhost:3000")
+ 
+-stripe.api_key = STRIPE_API_KEY
++stripe.api_key = STRIPE_API_KEY or ""
+ 
+ logger = logging.getLogger(__name__)
+ 
+diff --git a/server/app/auth/dependencies.py b/server/app/auth/dependencies.py
+index 6db8ce0..04170f9 100644
+--- a/server/app/auth/dependencies.py
++++ b/server/app/auth/dependencies.py
+@@ -1,4 +1,5 @@
+ import logging
++import os
+ import uuid
+ from typing import Annotated, Optional
+ 
+@@ -18,6 +19,53 @@ SESSION_COOKIE_NAME = "session_token"
+ # Setup header auth
+ api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+ 
++AUTO_AUTH = os.getenv("AUTO_AUTH", "false").strip().lower() in {
++    "1",
++    "true",
++    "yes",
++    "on",
++}
++AUTO_AUTH_EMAIL = os.getenv("AUTO_AUTH_EMAIL", "arthur@example.com")
++AUTO_AUTH_NAME = os.getenv("AUTO_AUTH_NAME", "Arthur")
++
++
++def _auto_auth_user(db: Session) -> CurrentUser:
++    """Return (and create if needed) the single local user for AUTO_AUTH."""
++    db_user = user_crud.get_by_email_and_provider(
++        db, email=AUTO_AUTH_EMAIL, provider="email"
++    )
++    if not db_user:
++        db_user = user_crud.create_email_user(
++            db, email=AUTO_AUTH_EMAIL, name=AUTO_AUTH_NAME
++        )
++        db_user = user_crud.verify_email(db, user=db_user)
++
++    changed = False
++    if not db_user.is_active:
++        db_user.is_active = True
++        changed = True
++    if db_user.is_blocked:
++        db_user.is_blocked = False
++        changed = True
++    if not db_user.is_email_verified:
++        db_user.is_email_verified = True
++        changed = True
++    if changed:
++        db.add(db_user)
++        db.commit()
++        db.refresh(db_user)
++
++    return CurrentUser(
++        id=uuid.UUID(str(db_user.id)),
++        email=str(db_user.email),
++        name=db_user.name,  # type: ignore
++        is_admin=bool(db_user.is_admin),
++        picture=db_user.picture,  # type: ignore
++        is_email_verified=True,
++        is_active=subscription_crud.is_user_active(db, db_user),
++        is_blocked=False,
++    )
++
+ 
+ def get_current_user(
+     request: Request,
+@@ -29,6 +77,9 @@ def get_current_user(
+ 
+     This is a FastAPI dependency that can be used in route functions.
+     """
++    if AUTO_AUTH:
++        return _auto_auth_user(db)
++
+     token = None
+ 
+     # First try from Authorization header
+diff --git a/server/app/auth/email.py b/server/app/auth/email.py
+index 56b018b..477d69e 100644
+--- a/server/app/auth/email.py
++++ b/server/app/auth/email.py
+@@ -27,6 +27,21 @@ class EmailAuthClient:
+             bool: True if email was sent successfully, False otherwise
+         """
+         try:
++            if os.getenv("EMAIL_VERIFICATION_CONSOLE", "").strip().lower() in {
++                "1",
++                "true",
++                "yes",
++                "on",
++            } and not os.getenv("RESEND_API_KEY"):
++                # Self-hosted fallback: no mail provider configured, so put the
++                # code where the operator can read it instead of failing login.
++                logger.warning(
++                    "Email verification code for %s is %s (RESEND_API_KEY is not set)",
++                    email,
++                    verification_code,
++                )
++                return True
++
+             subject = "Your Open Paper verification code"
+ 
+             html_template = load_email_template("verification_code.html")
+diff --git a/server/app/database/telemetry.py b/server/app/database/telemetry.py
+index fd4f8db..a9e90ba 100644
+--- a/server/app/database/telemetry.py
++++ b/server/app/database/telemetry.py
+@@ -14,21 +14,25 @@ logger = logging.getLogger(__name__)
+ POSTHOG_API_KEY = os.getenv("POSTHOG_API_KEY", None)
+ DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
+ 
+-posthog = Posthog(
+-    POSTHOG_API_KEY,
+-    host="https://us.i.posthog.com",
+-    enable_exception_autocapture=True,
+-)
+-
+-posthog_sync = Posthog(
+-    POSTHOG_API_KEY,
+-    host="https://us.i.posthog.com",
+-    sync_mode=True,
+-    enable_exception_autocapture=True,
+-)
+-
+-if DEBUG:
+-    posthog.debug = True
++# Telemetry is optional. Constructing the client with an empty key only
++# produces per-process error logs, so skip it entirely when unconfigured.
++if POSTHOG_API_KEY:
++    posthog = Posthog(
++        POSTHOG_API_KEY,
++        host="https://us.i.posthog.com",
++        enable_exception_autocapture=True,
++    )
++    posthog_sync = Posthog(
++        POSTHOG_API_KEY,
++        host="https://us.i.posthog.com",
++        sync_mode=True,
++        enable_exception_autocapture=True,
++    )
++    if DEBUG:
++        posthog.debug = True
++else:
++    posthog = None
++    posthog_sync = None
+ 
+ 
+ def _lookup_subscription(db: Optional[Session], user_id: str):
+diff --git a/server/app/helpers/compute_agent.py b/server/app/helpers/compute_agent.py
+index 0ba9030..4369675 100644
+--- a/server/app/helpers/compute_agent.py
++++ b/server/app/helpers/compute_agent.py
+@@ -171,7 +171,7 @@ def _generate_script(
+     # imported by modules that load before it.
+     from app.llm.base import ModelType
+     from app.llm.operations import operations
+-    from app.llm.provider import LLMProvider, TextContent
++    from app.llm.provider import TextContent, default_provider
+ 
+     if previous_script is None:
+         text = COMPUTE_SCRIPT_USER_MESSAGE.format(
+@@ -193,7 +193,7 @@ def _generate_script(
+             table_path=TABLE_PATH, output_path=OUTPUT_PATH
+         ),
+         model_type=ModelType.DEFAULT,
+-        provider=LLMProvider.GEMINI,
++        provider=default_provider(),
+     )
+     if not response or not response.text:
+         return None
+diff --git a/server/app/helpers/discover.py b/server/app/helpers/discover.py
+index 107ee51..ade95c2 100644
+--- a/server/app/helpers/discover.py
++++ b/server/app/helpers/discover.py
+@@ -12,13 +12,12 @@ from app.helpers.openalex_search import (
+     search_openalex,
+ )
+ from app.llm.base import BaseLLMClient, ModelType
+-from app.llm.provider import LLMProvider
+ from app.schemas.discover import DISCOVER_SOURCES
+ from pydantic import BaseModel, Field
+ 
+ logger = logging.getLogger(__name__)
+ 
+-llm_client = BaseLLMClient(default_provider=LLMProvider.GEMINI)
++llm_client = BaseLLMClient()
+ 
+ DECOMPOSE_PROMPT = """You are a research assistant helping find academic papers. Given a research question, generate 2-5 search subqueries.
+ 
+diff --git a/server/app/helpers/s3.py b/server/app/helpers/s3.py
+index 8f861ad..45082fb 100644
+--- a/server/app/helpers/s3.py
++++ b/server/app/helpers/s3.py
+@@ -25,6 +25,8 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
+ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+ S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
+ CLOUDFLARE_BUCKET_NAME = os.environ.get("CLOUDFLARE_BUCKET_NAME")
++S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
++S3_PUBLIC_BASE_URL = os.environ.get("S3_PUBLIC_BASE_URL")
+ 
+ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
+ 
+@@ -38,19 +40,32 @@ class S3Service:
+ 
+     def __init__(self):
+         """Initialize S3 client"""
++        s3_config = {"addressing_style": "path"} if S3_ENDPOINT_URL else {}
+         self.s3_client = boto3.client(
+             "s3",  # type: ignore
+             aws_access_key_id=AWS_ACCESS_KEY_ID,
+             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+             region_name=AWS_REGION,
++            endpoint_url=S3_ENDPOINT_URL or None,
+             # Give up on a stalled connection after 10s rather than botocore's
+             # default 60s. botocore makes several attempts, so at 60s each a
+             # chat turn reading its PDF could be held open for minutes.
+-            config=Config(connect_timeout=10),
++            config=Config(connect_timeout=10, s3=s3_config),
+         )
+         self.bucket_name = S3_BUCKET_NAME
+         self.cloudflare_bucket_name = CLOUDFLARE_BUCKET_NAME
+ 
++    def public_url(self, object_key: str) -> str:
++        """Browser-reachable URL for an object.
++
++        With MinIO we serve from a public bucket through a host reachable by
++        the browser, rather than rewriting a presigned URL whose signature
++        covers the host.
++        """
++        if S3_PUBLIC_BASE_URL:
++            return f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{object_key.lstrip('/')}"
++        return f"https://{self.cloudflare_bucket_name}/{object_key}"
++
+     def _validate_pdf_url(self, url: str) -> bool:
+         """
+         Validate if URL points to a PDF file
+@@ -99,7 +114,7 @@ class S3Service:
+                 )
+ 
+             # Generate the URL for the uploaded file
+-            file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
++            file_url = self.public_url(object_key)
+ 
+             return object_key, file_url
+ 
+@@ -138,7 +153,7 @@ class S3Service:
+             )
+ 
+             # Generate the URL for the uploaded file
+-            file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
++            file_url = self.public_url(object_key)
+ 
+             return object_key, file_url
+ 
+@@ -206,6 +221,12 @@ class S3Service:
+             str: Presigned URL or None if error
+         """
+         try:
++            # A public MinIO bucket has no need for a signature, and a
++            # presigned URL would carry an internal container host the browser
++            # cannot resolve.
++            if S3_PUBLIC_BASE_URL:
++                return self.public_url(object_key)
++
+             url = self.s3_client.generate_presigned_url(
+                 "get_object",
+                 Params={"Bucket": self.bucket_name, "Key": object_key},
+@@ -557,7 +578,7 @@ class S3Service:
+             )
+ 
+             # Generate the URL for the duplicated file
+-            file_url = f"https://{self.cloudflare_bucket_name}/{new_object_key}"
++            file_url = self.public_url(new_object_key)
+ 
+             return new_object_key, file_url
+ 
+@@ -578,10 +599,18 @@ class S3Service:
+         """
+         try:
+             # Extract the object key from the URL
+-            parsed_url = s3_url.split(f"https://{self.cloudflare_bucket_name}/")
+-            if len(parsed_url) != 2:
++            prefixes = []
++            if S3_PUBLIC_BASE_URL:
++                prefixes.append(f"{S3_PUBLIC_BASE_URL.rstrip('/')}/")
++            prefixes.append(f"https://{self.cloudflare_bucket_name}/")
++
++            source_object_key = None
++            for prefix in prefixes:
++                if s3_url.startswith(prefix):
++                    source_object_key = s3_url[len(prefix):]
++                    break
++            if not source_object_key:
+                 raise ValueError("Invalid S3 URL format")
+-            source_object_key = parsed_url[1]
+ 
+             return self.duplicate_file(source_object_key, new_filename)
+ 
+diff --git a/server/app/helpers/scrape.py b/server/app/helpers/scrape.py
+index e7253ad..5a0efa0 100644
+--- a/server/app/helpers/scrape.py
++++ b/server/app/helpers/scrape.py
+@@ -3,10 +3,9 @@ import os
+ from firecrawl import FirecrawlApp
+ 
+ FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
+-if not FIRECRAWL_API_KEY:
+-    raise ValueError("FIRECRAWL_API_KEY environment variable is not set.")
+-
+-firecrawl_app = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
++# Optional: URL scraping is one tool the assistant can use, not something that
++# should prevent a self-hosted deployment from booting.
++firecrawl_app = FirecrawlApp(api_key=FIRECRAWL_API_KEY) if FIRECRAWL_API_KEY else None
+ 
+ 
+ def scrape_web_page(url: str) -> str:
+@@ -20,6 +19,11 @@ def scrape_web_page(url: str) -> str:
+         str: The scraped content of the web page.
+     """
+     try:
++        if firecrawl_app is None:
++            raise Exception(
++                "Firecrawl is not configured; set FIRECRAWL_API_KEY to enable "
++                "web page scraping"
++            )
+         # firecrawl-py 4.x: scrape() returns a Document (with .markdown) on
+         # success and raises on failure. There is no .error attribute.
+         document = firecrawl_app.scrape(url, formats=["markdown"])
+diff --git a/server/app/helpers/unit_conversion.py b/server/app/helpers/unit_conversion.py
+index b4cea68..074a0e3 100644
+--- a/server/app/helpers/unit_conversion.py
++++ b/server/app/helpers/unit_conversion.py
+@@ -43,11 +43,8 @@ logger = logging.getLogger(__name__)
+ # and fail them one by one, minutes apart, at the last step. Better to refuse
+ # to start.
+ E2B_API_KEY = os.getenv("E2B_DEV_API_KEY") or os.getenv("E2B_API_KEY")
+-if not E2B_API_KEY:
+-    raise ValueError(
+-        "E2B_DEV_API_KEY or E2B_API_KEY environment variable is not set. "
+-        "Model-authored unit conversions only run in the sandbox."
+-    )
++# No key is fine at import time: single-key self-hosted deployments boot
++# without the sandbox and only lose the features that require it.
+ 
+ CONVERSIONS_PATH = "/home/user/conversions.json"
+ CONVERTED_PATH = "/home/user/converted.json"
+@@ -160,6 +157,11 @@ def run_unit_conversions(
+         return {}, {}
+ 
+     payload = [request._asdict() for request in requests]
++    if not E2B_API_KEY:
++        raise ConversionError(
++            "E2B_DEV_API_KEY or E2B_API_KEY is not set; unit conversions need "
++            "the sandbox"
++        )
+     sandbox = Sandbox.create(api_key=E2B_API_KEY, timeout=120)
+     try:
+         sandbox.files.write(CONVERSIONS_PATH, json.dumps(payload))
+diff --git a/server/app/llm/base.py b/server/app/llm/base.py
+index 721a37e..39ff9d4 100644
+--- a/server/app/llm/base.py
++++ b/server/app/llm/base.py
+@@ -17,6 +17,7 @@ from app.llm.provider import (
+     OpenAIProvider,
+     StreamChunk,
+     ToolCallResult,
++    default_provider as default_provider_from_env,
+     strict_json_schema,
+ )
+ from app.llm.utils import is_provider_outage, retry_llm_operation
+@@ -39,16 +40,38 @@ def _fallback_provider_from_env() -> Optional[LLMProvider]:
+     return LLMProvider(value.lower()) if value else None
+ 
+ 
++def _enabled_providers_from_env() -> List[LLMProvider]:
++    """Providers to initialize at startup.
++
++    Upstream initializes every provider, which requires a key for each. A
++    single-key self-hosted deployment sets LLM_ENABLED_PROVIDERS=openai so it
++    does not need Gemini or Anthropic credentials just to boot.
++    """
++    raw = os.getenv("LLM_ENABLED_PROVIDERS", "").strip()
++    if not raw:
++        return list(LLMProvider)
++
++    providers: List[LLMProvider] = []
++    for item in raw.split(","):
++        name = item.strip().lower()
++        if not name:
++            continue
++        try:
++            providers.append(LLMProvider(name))
++        except ValueError:
++            logger.warning("Ignoring unknown LLM_ENABLED_PROVIDERS entry %r", name)
++    return providers or list(LLMProvider)
++
++
+ class BaseLLMClient:
+     """Unified LLM client that supports multiple providers"""
+ 
+-    def __init__(self, default_provider: LLMProvider = LLMProvider.GEMINI):
+-        self.default_provider = default_provider
++    def __init__(self, default_provider: Optional[LLMProvider] = None):
++        self.default_provider = default_provider or default_provider_from_env()
+         self.fallback_provider = _fallback_provider_from_env()
+         self._providers: Dict[LLMProvider, BaseLLMProvider] = {}
+ 
+-        # Initialize all providers to ensure they are ready for use
+-        for provider in LLMProvider:
++        for provider in _enabled_providers_from_env():
+             self._initialize_provider(provider)
+ 
+     def get_chat_model_options(
+diff --git a/server/app/llm/chart_operations/extraction.py b/server/app/llm/chart_operations/extraction.py
+index 5921f08..f089f5f 100644
+--- a/server/app/llm/chart_operations/extraction.py
++++ b/server/app/llm/chart_operations/extraction.py
+@@ -55,7 +55,7 @@ from app.llm.chart_operations.text import (
+ )
+ from app.llm.conversation_operations import DataTableOperations
+ from app.llm.prompts import CHART_EXTRACTION_SYSTEM_PROMPT
+-from app.llm.provider import FileContent, LLMProvider, TextContent
++from app.llm.provider import FileContent, LLMProvider, TextContent, default_provider
+ from app.schemas.chart import (
+     ChartArtifactPayload,
+     ChartCoverage,
+@@ -146,7 +146,7 @@ def _paper_pdf(
+     current_user: CurrentUser,
+     db: Session,
+     project_id: Optional[str],
+-) -> Optional[tuple[bytes, str]]:
++) -> Optional[tuple[bytes, str, Optional[str]]]:
+     """The stored PDF for a paper, or None when it has no indexed file.
+ 
+     A paper in a project with no object key is an indexing failure, not a
+@@ -168,7 +168,11 @@ def _paper_pdf(
+     data = s3_service.download_bytes(str(paper.s3_object_key))
+     if not data:
+         return None
+-    return data, f"{str(paper.title) if paper.title else 'paper'}.pdf"
++    return (
++        data,
++        f"{str(paper.title) if paper.title else 'paper'}.pdf",
++        str(paper.raw_content) if paper.raw_content else None,
++    )
+ 
+ 
+ def _read_quantity(quoted: ChartQuotedValue) -> ChartValue:
+@@ -445,7 +449,7 @@ class ChartExtracting(DataTableOperations):
+         # A shortlisted paper with no stored PDF is an indexing failure. Falling
+         # back to its extracted text is what put wrong numbers on charts, so it
+         # is reported instead.
+-        documents: dict[str, tuple[bytes, str]] = {}
++        documents: dict[str, tuple[bytes, str, Optional[str]]] = {}
+         unindexed: list[str] = []
+         for paper_id in shortlisted:
+             try:
+@@ -466,11 +470,14 @@ class ChartExtracting(DataTableOperations):
+         papers_attempted: set[str] = set()
+ 
+         def extract(paper_id: str) -> list[ChartExtractionRecord]:
+-            data, filename = documents[paper_id]
++            data, filename, raw_text = documents[paper_id]
+             response = self.generate_content(
+                 contents=[
+                     FileContent(
+-                        data=data, mime_type="application/pdf", filename=filename
++                        data=data,
++                        mime_type="application/pdf",
++                        filename=filename,
++                        text_fallback=raw_text,
+                     ),
+                     TextContent(
+                         text=(
+@@ -490,7 +497,7 @@ class ChartExtracting(DataTableOperations):
+                 ),
+                 model_type=ModelType.FAST,
+                 schema=extraction_schema,
+-                provider=LLMProvider.GEMINI,
++                provider=default_provider(),
+             )
+             if not response or not response.text:
+                 return []
+diff --git a/server/app/llm/chart_operations/planning.py b/server/app/llm/chart_operations/planning.py
+index 860dc58..6d3c3b3 100644
+--- a/server/app/llm/chart_operations/planning.py
++++ b/server/app/llm/chart_operations/planning.py
+@@ -29,7 +29,7 @@ from app.llm.prompts import (
+     CHART_SCOPE_SYSTEM_PROMPT,
+     CHART_VERIFICATION_SYSTEM_PROMPT,
+ )
+-from app.llm.provider import LLMProvider, TextContent
++from app.llm.provider import LLMProvider, TextContent, default_provider
+ from app.llm.tools.file_tools import read_abstract, read_file, search_all_files
+ from app.schemas.chart import (
+     ChartField,
+@@ -338,7 +338,7 @@ class ChartPlanning(DataTableOperations):
+             system_prompt=CHART_SCOPE_SYSTEM_PROMPT,
+             model_type=ModelType.FAST,
+             schema=ChartScope.model_json_schema(),
+-            provider=LLMProvider.GEMINI,
++            provider=default_provider(),
+         )
+         if not response or not response.text:
+             return ChartScope(covers="all_papers")
+@@ -416,7 +416,7 @@ class ChartPlanning(DataTableOperations):
+             system_prompt=CHART_PLAN_SYSTEM_PROMPT,
+             model_type=ModelType.FAST,
+             schema=ChartPlanCandidates.model_json_schema(),
+-            provider=LLMProvider.GEMINI,
++            provider=default_provider(),
+         )
+         if not response or not response.text:
+             return ChartProposal()
+diff --git a/server/app/llm/citation_recovery.py b/server/app/llm/citation_recovery.py
+index fd4de71..7f5075e 100644
+--- a/server/app/llm/citation_recovery.py
++++ b/server/app/llm/citation_recovery.py
+@@ -22,7 +22,7 @@ from app.helpers.citations import CitationFields, bibliographic_gaps, fields_fro
+ from app.helpers.paper_search import extract_doi_from_url
+ from app.helpers.parser import parse_publication_date
+ from app.llm.base import BaseLLMClient, ModelType
+-from app.llm.provider import LLMProvider
++from app.llm.provider import LLMProvider, default_provider
+ from app.llm.tools.web_tools import (
+     web_fetch,
+     web_fetch_function,
+@@ -201,7 +201,7 @@ class MetadataRecoveryAgent(BaseLLMClient):
+                     function_declarations=function_declarations,
+                     tool_call_results=tool_call_results or None,
+                     model_type=ModelType.DEFAULT,
+-                    provider=LLMProvider.GEMINI,
++                    provider=default_provider(),
+                     enable_thinking=True,
+                 )
+             except Exception:
+@@ -318,7 +318,7 @@ class MetadataRecoveryAgent(BaseLLMClient):
+                 contents=[TextContent(text=prompt)],
+                 schema=CITATION_EXTRACTION_SCHEMA,
+                 model_type=ModelType.DEFAULT,
+-                provider=LLMProvider.GEMINI,
++                provider=default_provider(),
+                 enable_thinking=False,
+             )
+             findings = json.loads(resp.text)
+diff --git a/server/app/llm/conversation_operations.py b/server/app/llm/conversation_operations.py
+index e62d633..3e715d4 100644
+--- a/server/app/llm/conversation_operations.py
++++ b/server/app/llm/conversation_operations.py
+@@ -17,7 +17,7 @@ from app.llm.prompts import (
+     RENAME_CONVERSATION_SYSTEM_PROMPT,
+     RENAME_CONVERSATION_USER_MESSAGE,
+ )
+-from app.llm.provider import LLMProvider, TextContent
++from app.llm.provider import LLMProvider, TextContent, default_provider
+ from app.llm.tools.file_tools import (
+     read_abstract,
+     read_abstract_function,
+@@ -253,7 +253,7 @@ class DataTableOperations(BaseLLMClient):
+                 model_type=ModelType.FAST,
+                 function_declarations=function_declarations,
+                 tool_call_results=tool_call_results or None,
+-                provider=LLMProvider.GEMINI,
++                provider=default_provider(),
+             )
+             if not response or not response.tool_calls:
+                 investigation_report = (response.text or "").strip() if response else ""
+@@ -473,7 +473,7 @@ class DataTableOperations(BaseLLMClient):
+                 model_type=ModelType.FAST,
+                 function_declarations=function_declarations,
+                 tool_call_results=tool_call_results or None,
+-                provider=LLMProvider.GEMINI,
++                provider=default_provider(),
+             )
+ 
+             if not response or not response.tool_calls:
+@@ -571,7 +571,7 @@ class DataTableOperations(BaseLLMClient):
+             system_prompt=PROPOSE_DATA_TABLE_SCHEMA_FINAL_SYSTEM_PROMPT,
+             model_type=ModelType.FAST,
+             schema=DataTableSchemaProposal.model_json_schema(),
+-            provider=LLMProvider.GEMINI,
++            provider=default_provider(),
+         )
+ 
+         if response and response.text:
+diff --git a/server/app/llm/multi_paper_operations.py b/server/app/llm/multi_paper_operations.py
+index ce0fbcd..6605404 100644
+--- a/server/app/llm/multi_paper_operations.py
++++ b/server/app/llm/multi_paper_operations.py
+@@ -21,7 +21,7 @@ from app.llm.prompts import (
+     GENERATE_MULTI_PAPER_NARRATIVE_SUMMARY,
+     format_scope,
+ )
+-from app.llm.provider import LLMProvider, StreamChunk, SupplementaryContent, TextContent
++from app.llm.provider import LLMProvider, StreamChunk, SupplementaryContent, TextContent, default_provider
+ from app.llm.utils import retry_llm_operation
+ from app.schemas.artifact import CitationArtifactPayload
+ from app.schemas.message import EvidenceCollection
+@@ -362,7 +362,7 @@ class MultiPaperOperations(EvidenceOperations):
+         async for result in self.gather_evidence(
+             question=f"{summary_request}",
+             current_user=current_user,
+-            llm_provider=LLMProvider.GEMINI,
++            llm_provider=default_provider(),
+             project_id=project_id,
+             db=db,
+         ):
+@@ -406,7 +406,7 @@ class MultiPaperOperations(EvidenceOperations):
+         response = self.generate_content(
+             contents=message_content,
+             model_type=ModelType.DEFAULT,
+-            provider=LLMProvider.GEMINI,
++            provider=default_provider(),
+             schema=AudioOverviewForLLM,
+         )
+ 
+diff --git a/server/app/llm/provider.py b/server/app/llm/provider.py
+index 24e790e..bb73163 100644
+--- a/server/app/llm/provider.py
++++ b/server/app/llm/provider.py
+@@ -63,6 +63,21 @@ class LLMProvider(Enum):
+     ANTHROPIC = "anthropic"
+ 
+ 
++def default_provider() -> LLMProvider:
++    """The provider every operation uses unless one is passed explicitly.
++
++    Defaults to Gemini to match upstream, but a self-hosted deployment that only
++    has an OpenAI-compatible key (for example OpenCode Go) sets
++    LLM_DEFAULT_PROVIDER=openai.
++    """
++    raw = os.getenv("LLM_DEFAULT_PROVIDER", LLMProvider.GEMINI.value).strip().lower()
++    try:
++        return LLMProvider(raw)
++    except ValueError:
++        logger.warning("Unknown LLM_DEFAULT_PROVIDER=%r; falling back to gemini", raw)
++        return LLMProvider.GEMINI
++
++
+ class LLMResponse:
+     """Standardized response format across all LLM providers"""
+ 
+@@ -702,7 +717,7 @@ class OpenAIProvider(BaseLLMProvider):
+         base_url: Optional[str] = None,
+         default_model: Optional[str] = None,
+         fast_model: Optional[str] = None,
+-        supports_pdf_input: bool = True,
++        supports_pdf_input: Optional[bool] = None,
+     ):
+ 
+         # Allow explicit api_key/base_url overrides while keeping env-based defaults.
+@@ -713,16 +728,45 @@ class OpenAIProvider(BaseLLMProvider):
+ 
+         # For standard OpenAI, base_url should be None. For OpenAI-compatible
+         # providers, pass a custom base_url when constructing this provider.
+-        self._client = LangfuseOpenAI(api_key=self.api_key, base_url=base_url)
++        base_url = base_url or os.getenv("OPENAI_BASE_URL") or None
++
++        # Optional static headers, e.g. OpenCode Go's routing header.
++        headers: Dict[str, str] = {}
++        raw_headers = os.getenv("OPENAI_EXTRA_HEADERS")
++        if raw_headers:
++            try:
++                parsed_headers = json.loads(raw_headers)
++                if isinstance(parsed_headers, dict):
++                    headers = {str(k): str(v) for k, v in parsed_headers.items()}
++            except (TypeError, ValueError):
++                logger.warning("OPENAI_EXTRA_HEADERS is not valid JSON; ignoring it")
++
++        self._client = LangfuseOpenAI(
++            api_key=self.api_key,
++            base_url=base_url,
++            default_headers=headers or None,
++        )
+         # Streaming runs on the async client so chunk reads don't block the
+         # event loop; everything else still uses the sync client.
+         self._async_client = LangfuseAsyncOpenAI(
+-            api_key=self.api_key, base_url=base_url
++            api_key=self.api_key,
++            base_url=base_url,
++            default_headers=headers or None,
++        )
++        self._default_model = (
++            default_model
++            or os.getenv("OPENAI_DEFAULT_MODEL")
++            or "gpt-6.1-terra"
++        )
++        self._fast_model = (
++            fast_model or os.getenv("OPENAI_FAST_MODEL") or "gpt-6-luna"
+         )
+-        self._default_model = default_model or "gpt-6.1-terra"
+-        self._fast_model = fast_model or "gpt-6-luna"
+         # Some OpenAI-compatible endpoints reject `file` content blocks.
+         # When False, FileContent for PDFs uses text_fallback inline.
++        if supports_pdf_input is None:
++            supports_pdf_input = os.getenv(
++                "OPENAI_SUPPORTS_PDF_INPUT", "true"
++            ).strip().lower() in {"1", "true", "yes", "on"}
+         self.supports_pdf_input = supports_pdf_input
+ 
+     @property
+@@ -783,6 +827,15 @@ class OpenAIProvider(BaseLLMProvider):
+                 "Thinking requested, but reasoning models not yet enabled for OpenAI provider"
+             )
+ 
++        # Match the OpenWebUI model profile where it can be expressed on the
++        # chat-completions request.
++        reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT")
++        if reasoning_effort:
++            kwargs.setdefault("reasoning_effort", reasoning_effort)
++        max_tokens = os.getenv("OPENAI_MAX_TOKENS")
++        if max_tokens:
++            kwargs.setdefault("max_tokens", int(max_tokens))
++
+         response = self.client.chat.completions.create(
+             model=model, messages=all_messages, **kwargs
+         )
+@@ -828,6 +881,13 @@ class OpenAIProvider(BaseLLMProvider):
+         # message with nothing raised anywhere.
+         state = {"saw_text": False}
+ 
++        reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT")
++        if reasoning_effort:
++            kwargs.setdefault("reasoning_effort", reasoning_effort)
++        max_tokens = os.getenv("OPENAI_MAX_TOKENS")
++        if max_tokens:
++            kwargs.setdefault("max_tokens", int(max_tokens))
++
+         async def open_stream():
+             state["saw_text"] = False
+             return await self._async_client.chat.completions.create(
+diff --git a/server/app/main.py b/server/app/main.py
+index a20f412..6a8feb6 100644
+--- a/server/app/main.py
++++ b/server/app/main.py
+@@ -56,11 +56,18 @@ app = FastAPI(
+ )
+ 
+ client_domain = os.getenv("CLIENT_DOMAIN", "http://localhost:3000")
++extra_origins = [
++    origin.strip()
++    for origin in os.getenv("CORS_EXTRA_ORIGINS", "").split(",")
++    if origin.strip()
++]
++cors_origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX", "").strip() or None
+ 
+ # Configure CORS
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=[client_domain],
++    allow_origins=[client_domain, *extra_origins],
++    allow_origin_regex=cors_origin_regex,
+     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+     allow_headers=["*"],
+     expose_headers=["*"],

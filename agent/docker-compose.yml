@@ -1,5 +1,7 @@
 x-openpaper-jobs: &openpaper-jobs
   image: openpaper-jobs:local
+  labels:
+    com.centurylinklabs.watchtower.enable: "false"
   build:
     context: ./openpaper/jobs
   environment:
@@ -140,6 +142,8 @@ services:
   # ---------------------------------------------------------------------------
   openpaper-postgres:
     image: postgres:17
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -154,19 +158,26 @@ services:
     restart: unless-stopped
 
   openpaper-rabbitmq:
-    image: rabbitmq:4.1.2-management
+    # No management/prometheus plugins: this stack only needs AMQP, and those
+    # plugins plus a 5s rabbitmq-diagnostics healthcheck burned CPU even idle.
+    image: rabbitmq:4.1.2-alpine
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 5s
-      timeout: 10s
-      retries: 30
+      test: ["CMD", "nc", "-z", "localhost", "5672"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   openpaper-redis:
     image: redis:7-alpine
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -176,6 +187,8 @@ services:
 
   openpaper-minio:
     image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: openpaper
@@ -190,6 +203,8 @@ services:
 
   openpaper-minio-init:
     image: amazon/aws-cli:latest
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     depends_on:
       openpaper-minio:
         condition: service_started
@@ -208,6 +223,8 @@ services:
 
   openpaper-migrate:
     image: openpaper-server:local
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     build:
       context: ./openpaper/server
     command: ["python", "app/scripts/run_migrations.py"]
@@ -220,6 +237,8 @@ services:
 
   openpaper-server:
     image: openpaper-server:local
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     build:
       context: ./openpaper/server
     command: ["python3", "-m", "app.main"]
@@ -305,8 +324,29 @@ services:
     healthcheck:
       disable: true
 
+  openpaper-updater:
+    image: openpaper-updater:local
+    build:
+      context: .
+      dockerfile: openpaper-updater.Dockerfile
+    container_name: openpaper-updater
+    restart: unless-stopped
+    # Run as the host user so updated checkouts stay editable, with the host
+    # docker group for socket access.
+    user: "1000:1000"
+    group_add:
+      - "983"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/arthur/homelab:/home/arthur/homelab
+    working_dir: /home/arthur/homelab/agent
+
   openpaper-client:
     image: openpaper-client:local
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
     build:
       context: ./openpaper/client
       dockerfile: Dockerfile.local

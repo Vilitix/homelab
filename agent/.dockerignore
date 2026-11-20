@@ -1,0 +1,6 @@
+openpaper/
+data/
+backups/
+*.dump
+*.log
+*.bak.*

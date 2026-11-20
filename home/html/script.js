@@ -19,6 +19,7 @@ const services = [
     { name: "MusicGrabber (Arthur)", port: 38274, icon: "headphones.png" },
     { name: "MusicGrabber (Karine)", port: 38275, icon: "headphones.png" },
     { name: "PhotoPrism", port: 2342, icon: "photoprism.png" },
+    { name: "Open Paper", port: 3100, icon: "openpaper.svg", localIcon: true },
     { name: "Portfolio", port: 80, icon: "nginx.png" },
     { name: "FreshRSS", port: 8085, icon: "freshrss.png" },
     { name: "RSS-Bridge", port: 8086, icon: "rss.png" },
@@ -53,7 +54,7 @@ function render() {
         link.target = "_blank";
 
         const img = document.createElement("img");
-        img.src = iconBase + service.icon;
+        img.src = service.localIcon ? service.icon : iconBase + service.icon;
         img.alt = service.name;
         img.onerror = function() {
             this.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" rx="12" fill="%23334155"/><text x="50%" y="50%" font-family="Arial" font-size="30" font-weight="bold" fill="%23f8fafc" dominant-baseline="central" text-anchor="middle">' + service.name.charAt(0) + '</text></svg>';

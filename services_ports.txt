@@ -46,3 +46,7 @@ PRESS / INFORMATION STACK (/home/arthur/homelab/press)
 AGENT STACK (/home/arthur/homelab/agent)
 - Open WebUI: 3080
 - SearXNG: 8888
+- Open Paper: 3100
+- Open Paper API: 8100
+- Open Paper Jobs API: 8101
+- Open Paper MinIO: 9000 (console 9001)

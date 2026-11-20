@@ -21,7 +21,7 @@ containers/
 
 #agent data
 /agent/*/
-!agent/openpaper
+/agent/openpaper/
 /agent/install.sh
 hermes-*
 SOUL.md
@@ -34,3 +34,13 @@ SOUL.md
 *.log
 .DS_Store
 Thumbs.db
+
+# OpenPaper declarative setup artifacts
+!agent/openpaper.patch
+!agent/openpaper-overlay/
+!agent/openpaper-overlay/**
+
+# OpenPaper runtime backups
+agent/openpaper-db-backup.*.dump
+agent/openpaper-update.log
+agent/openpaper-overlay/*
