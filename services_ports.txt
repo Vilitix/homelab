@@ -20,6 +20,7 @@ MEDIA STACK (/home/arthur/homelab/stream)
 - Prowlarr: 9696
 - Bazarr: 6767
 - FlareSolverr: 8191
+- Pingvin Share: 3030
 
 PORTFOLIO STACK (/home/arthur/homelab/portfolio)
 - Nginx: 80 / 443

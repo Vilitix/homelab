@@ -324,25 +324,6 @@ services:
     healthcheck:
       disable: true
 
-  openpaper-updater:
-    image: openpaper-updater:local
-    build:
-      context: .
-      dockerfile: openpaper-updater.Dockerfile
-    container_name: openpaper-updater
-    restart: unless-stopped
-    # Run as the host user so updated checkouts stay editable, with the host
-    # docker group for socket access.
-    user: "1000:1000"
-    group_add:
-      - "983"
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /home/arthur/homelab:/home/arthur/homelab
-    working_dir: /home/arthur/homelab/agent
-
   openpaper-client:
     image: openpaper-client:local
     labels:

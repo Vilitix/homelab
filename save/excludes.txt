@@ -12,3 +12,5 @@
 */Transcodes/*
 */downloads/*
 */photoprism/storage/cache/*
+# Pingvin Share uploads (temporary file drops, not worth backing up)
+pingvin

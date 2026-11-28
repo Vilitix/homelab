@@ -8,6 +8,7 @@ const services = [
     { name: "Jellyfin", port: 8096, icon: "jellyfin.png" },
     { name: "Overseerr", port: 5055, icon: "overseerr.png" },
     { name: "Maintainerr", port: 6246, icon: "maintainerr.png" },
+    { name: "Pingvin Share", port: 3030, icon: "pingvin-share.png" },
     { name: "qBittorrent", port: 18181, icon: "qbittorrent.png" },
     { name: "Sonarr", port: 8989, icon: "sonarr.png" },
     { name: "Radarr", port: 7878, icon: "radarr.png" },

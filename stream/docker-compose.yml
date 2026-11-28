@@ -20,6 +20,8 @@ services:
       - VPN_PORT_FORWARDING=on
       - VPN_PORT_FORWARDING_STATUS_FILE=/gluetun/forwarded_port
       - FIREWALL_OUTBOUND_SUBNETS=192.168.1.0/24,172.16.0.0/12
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
     ports:
         #- 32400:32400 #plex
       - 6881:6881 #qbit tcp
@@ -31,6 +33,7 @@ services:
       # - 5055:5055 # overseerr
       - 6767:6767 # bazarr
       - 8191:8191 # flaresolverr
+      - 127.0.0.1:18888:8888 # gluetun HTTP proxy, VPN egress (8888 taken by searxng)
     restart: always
 
   jellyfin:
@@ -253,5 +256,20 @@ services:
       - TZ=Europe/Paris
     volumes:
       - ${HOMELAB_DIR}/containers/maintainerr/data:/opt/data
+    restart: unless-stopped
+
+  pingvin-share:
+    image: smp46/pingvin-share-x:latest
+    container_name: pingvin-share
+    mem_limit: 512m
+    cpus: 0.5
+    environment:
+      - TRUST_PROXY=false
+      - TZ=Europe/Paris
+    ports:
+      - "3030:3000"
+    volumes:
+      - ${HOMELAB_DIR}/stream/pingvin/data:/opt/app/backend/data
+      - ${HOMELAB_DIR}/stream/pingvin/data/images:/opt/app/frontend/public/img
     restart: unless-stopped
 
